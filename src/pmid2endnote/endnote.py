@@ -22,12 +22,12 @@ def sanitize_temporary_citation_author(author: str | None) -> str:
 
 
 def make_temporary_citation(records: list[ReferenceRecord]) -> str:
-    """Build an EndNote temporary citation using generated citation keys."""
+    """Build an EndNote temporary citation using the Any Text search form."""
 
     parts = []
     for record in records:
         author = sanitize_temporary_citation_author(record.first_author)
         year = record.year or "0000"
         citation_key = getattr(record, "citation_key", None) or getattr(record, "pmid")
-        parts.append(f"{author}, {year} #{citation_key}")
+        parts.append(f"{author}, {year}, {citation_key}")
     return "{" + ";".join(parts) + "}"

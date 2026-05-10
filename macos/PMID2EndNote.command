@@ -91,7 +91,7 @@ STATUS=$?
 set -e
 echo
 if [[ "$STATUS" -eq 0 ]]; then
-  osascript -e 'display alert "PMID2EndNote finished. Open EndNote and import the generated .endnote-import.enw file into the target EndNote library using the EndNote Import option. In EndNote Temporary Citation preferences, set Use field instead of Record Number to Accession Number. Then open the generated .endnote.docx in Word and run EndNote > Update Citations and Bibliography."'
+  osascript -e 'display alert "PMID2EndNote finished. Open EndNote and import the generated .endnote-import.enw file into the target EndNote library using the EndNote Import option. Then open the generated .endnote.docx in Word desktop and run EndNote > Update Citations and Bibliography."'
 else
   osascript -e 'display alert "PMID2EndNote finished with an error. Check the Terminal output and the generated report JSON."'
 fi

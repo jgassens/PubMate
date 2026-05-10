@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import shutil
 from typing import Any
 
@@ -29,6 +30,37 @@ from pmid2endnote.scanner import (
 
 
 IdentifierKey = tuple[IdentifierKind, str]
+
+
+@dataclass(frozen=True)
+class ReplacementBlock:
+    """One Word-text range to replace, potentially containing mixed identifiers."""
+
+    original_text: str
+    start: int
+    end: int
+    blocks: tuple[IdentifierBlock, ...]
+    source: str
+
+    @property
+    def identifier_keys(self) -> tuple[IdentifierKey, ...]:
+        keys: list[IdentifierKey] = []
+        for block in self.blocks:
+            keys.extend((block.kind, identifier) for identifier in block.identifiers)
+        return tuple(keys)
+
+    @property
+    def pmids(self) -> tuple[str, ...]:
+        return tuple(value for kind, value in self.identifier_keys if kind == "pmid")
+
+    @property
+    def dois(self) -> tuple[str, ...]:
+        return tuple(value for kind, value in self.identifier_keys if kind == "doi")
+
+    @property
+    def kind(self) -> str:
+        kinds = {kind for kind, _ in self.identifier_keys}
+        return next(iter(kinds)) if len(kinds) == 1 else "mixed"
 
 
 @dataclass(frozen=True)
@@ -210,6 +242,8 @@ def replace_pmids_in_docx(
             "replacement in this implementation."
         )
 
+    _validate_replacement_citations(replacements)
+
     backup_path: Path | None = None
     if not options.dry_run:
         output_docx.parent.mkdir(parents=True, exist_ok=True)
@@ -349,11 +383,17 @@ def _replace_paragraph_blocks(
             f"{location.part} paragraph {location.paragraph_index}."
         ]
 
-    planned: list[tuple[IdentifierBlock, str]] = []
+    replacement_blocks = _replacement_blocks_for_text(
+        text,
+        scan_parenthetical_pmids=scan_parenthetical_pmids,
+        scan_dois=scan_dois,
+        scan_bare_dois=scan_bare_dois,
+    )
+    planned: list[tuple[ReplacementBlock, str]] = []
     report_replacements: list[dict[str, Any]] = []
     warnings: list[str] = []
 
-    for block in blocks:
+    for block in replacement_blocks:
         replacement_text = _replacement_for_block(
             block=block,
             records_by_identifier=records_by_identifier,
@@ -361,7 +401,7 @@ def _replace_paragraph_blocks(
             mark_unresolved=mark_unresolved,
         )
         if replacement_text is None:
-            identifier_label = _identifier_label(block.kind)
+            identifier_label = _replacement_block_label(block)
             warnings.append(
                 f"Left unresolved {identifier_label} block unchanged at {location.part} paragraph "
                 f"{location.paragraph_index}: {block.original_text}"
@@ -395,11 +435,11 @@ def _insert_comment_pmids_at_anchors(
     records_by_identifier: dict[IdentifierKey, ReferenceRecord],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     anchor_locations = _comment_anchor_locations(document, options)
-    planned_by_comment: dict[int, list[tuple[IdentifierBlock, str, TextLocation]]] = {}
+    planned_by_comment: dict[int, list[tuple[ReplacementBlock, str, TextLocation]]] = {}
     warnings: list[str] = []
 
     for paragraph, comment_location in _iter_comment_paragraphs(document, options):
-        blocks = scan_text(
+        blocks = _replacement_blocks_for_text(
             paragraph.text,
             scan_parenthetical_pmids=options.scan_parenthetical_pmids,
             scan_dois=options.scan_dois,
@@ -423,7 +463,7 @@ def _insert_comment_pmids_at_anchors(
                 mark_unresolved=options.mark_unresolved,
             )
             if replacement_text is None:
-                identifier_label = _identifier_label(block.kind)
+                identifier_label = _replacement_block_label(block)
                 warnings.append(
                     f"Left unresolved {identifier_label} block unchanged in comment {comment_location.comment_id}: "
                     f"{block.original_text}"
@@ -438,7 +478,7 @@ def _insert_comment_pmids_at_anchors(
         anchor = anchor_locations.get(comment_id)
         if anchor is None:
             identifiers = sorted(
-                {identifier for block, _, _ in planned for identifier in block.identifiers}
+                {identifier for block, _, _ in planned for _, identifier in block.identifier_keys}
             )
             warnings.append(
                 f"Could not find document anchor for comment {comment_id}; identifiers not inserted: "
@@ -524,32 +564,37 @@ def _find_comment_anchor_element(paragraph: Paragraph, comment_id: int):
 
 def _replacement_for_block(
     *,
-    block: IdentifierBlock,
+    block: ReplacementBlock,
     records_by_identifier: dict[IdentifierKey, ReferenceRecord],
     keep_pmid_text: bool,
     mark_unresolved: bool,
 ) -> str | None:
-    resolved_records = [
-        records_by_identifier[(block.kind, identifier)]
-        for identifier in block.identifiers
-        if (block.kind, identifier) in records_by_identifier
-    ]
-    unresolved_identifiers = [
-        identifier
-        for identifier in block.identifiers
-        if (block.kind, identifier) not in records_by_identifier
-    ]
+    resolved_records: list[ReferenceRecord] = []
+    seen_record_keys: set[str] = set()
+    unresolved_by_kind: dict[IdentifierKind, list[str]] = {"pmid": [], "doi": []}
+
+    for identifier_key in block.identifier_keys:
+        record = records_by_identifier.get(identifier_key)
+        if record is None:
+            unresolved_by_kind[identifier_key[0]].append(identifier_key[1])
+            continue
+        if record.citation_key in seen_record_keys:
+            continue
+        seen_record_keys.add(record.citation_key)
+        resolved_records.append(record)
 
     replacement_parts: list[str] = []
     if resolved_records:
         replacement_parts.append(make_temporary_citation(resolved_records))
 
-    if unresolved_identifiers:
+    unresolved_total = sum(len(values) for values in unresolved_by_kind.values())
+    if unresolved_total:
         if mark_unresolved or resolved_records:
-            label = _identifier_label(block.kind, plural=len(unresolved_identifiers) > 1)
-            replacement_parts.append(
-                f"[unresolved {label}: {', '.join(unresolved_identifiers)}]"
-            )
+            for kind, values in unresolved_by_kind.items():
+                if not values:
+                    continue
+                label = _identifier_label(kind, plural=len(values) > 1)
+                replacement_parts.append(f"[unresolved {label}: {', '.join(values)}]")
         else:
             return None
 
@@ -559,6 +604,154 @@ def _replacement_for_block(
     return replacement_text
 
 
+def _replacement_blocks_for_text(
+    text: str,
+    *,
+    scan_parenthetical_pmids: bool,
+    scan_dois: bool,
+    scan_bare_dois: bool,
+) -> list[ReplacementBlock]:
+    identifier_blocks = scan_text(
+        text,
+        scan_parenthetical_pmids=scan_parenthetical_pmids,
+        scan_dois=scan_dois,
+        scan_bare_dois=scan_bare_dois,
+    )
+    if not identifier_blocks:
+        return []
+
+    grouped: list[ReplacementBlock] = []
+    used_block_indexes: set[int] = set()
+    for start, end in _identifier_only_wrappers(text):
+        inside_indexes = [
+            index
+            for index, block in enumerate(identifier_blocks)
+            if _block_inside_wrapper(block, start, end)
+        ]
+        if not inside_indexes or any(index in used_block_indexes for index in inside_indexes):
+            continue
+        inside_blocks = tuple(identifier_blocks[index] for index in inside_indexes)
+        if not _wrapper_contains_only_identifiers(text, start, end, inside_blocks):
+            continue
+        grouped.append(
+            ReplacementBlock(
+                original_text=text[start:end],
+                start=start,
+                end=end,
+                blocks=inside_blocks,
+                source="wrapper",
+            )
+        )
+        used_block_indexes.update(inside_indexes)
+
+    for run in _adjacent_identifier_runs(text, identifier_blocks, used_block_indexes):
+        if len(run) > 1:
+            grouped.append(
+                ReplacementBlock(
+                    original_text=text[run[0].start : run[-1].end],
+                    start=run[0].start,
+                    end=run[-1].end,
+                    blocks=tuple(run),
+                    source="identifier_run",
+                )
+            )
+            continue
+        block = run[0]
+        grouped.append(
+            ReplacementBlock(
+                original_text=block.original_text,
+                start=block.start,
+                end=block.end,
+                blocks=(block,),
+                source=block.source,
+            )
+        )
+
+    return sorted(grouped, key=lambda block: block.start)
+
+
+def _identifier_only_wrappers(text: str) -> Iterator[tuple[int, int]]:
+    for match in re.finditer(r"\[[^\[\]]+\]", text):
+        yield match.start(), match.end()
+    for match in re.finditer(r"\([^()]+\)", text):
+        yield match.start(), match.end()
+
+
+def _adjacent_identifier_runs(
+    text: str,
+    blocks: list[IdentifierBlock],
+    used_block_indexes: set[int],
+) -> Iterator[list[IdentifierBlock]]:
+    available = [
+        block for index, block in enumerate(blocks)
+        if index not in used_block_indexes
+    ]
+    if not available:
+        return
+
+    run = [available[0]]
+    for block in available[1:]:
+        separator = text[run[-1].end : block.start]
+        if _should_group_adjacent(run[-1], block) and re.fullmatch(r"[\s,;]+", separator or ""):
+            run.append(block)
+            continue
+        yield run
+        run = [block]
+    yield run
+
+
+def _should_group_adjacent(left: IdentifierBlock, right: IdentifierBlock) -> bool:
+    return left.source != "parenthetical" and right.source != "parenthetical"
+
+
+def _block_inside_wrapper(block: IdentifierBlock, start: int, end: int) -> bool:
+    return block.start >= start and block.end <= end
+
+
+def _wrapper_contains_only_identifiers(
+    text: str,
+    start: int,
+    end: int,
+    blocks: tuple[IdentifierBlock, ...],
+) -> bool:
+    inner_start = start + 1
+    inner_end = end - 1
+    cursor = inner_start
+    remaining: list[str] = []
+    for block in sorted(blocks, key=lambda value: value.start):
+        block_start = max(block.start, inner_start)
+        block_end = min(block.end, inner_end)
+        if block_start > cursor:
+            remaining.append(text[cursor:block_start])
+        cursor = max(cursor, block_end)
+    if cursor < inner_end:
+        remaining.append(text[cursor:inner_end])
+    return re.fullmatch(r"[\s,;]*", "".join(remaining)) is not None
+
+
+def _validate_replacement_citations(replacements: list[dict[str, Any]]) -> None:
+    bad_replacements = [
+        replacement["replacement_text"]
+        for replacement in replacements
+        if "#PMID-" in replacement.get("replacement_text", "")
+        or "#DOI-" in replacement.get("replacement_text", "")
+    ]
+    if bad_replacements:
+        raise WordProcessingError(
+            "Generated temporary citation used the EndNote record-number marker "
+            "with an app-controlled PMID/DOI key."
+        )
+
+
+def _replacement_block_label(block: ReplacementBlock) -> str:
+    kinds = {kind for kind, _ in block.identifier_keys}
+    if kinds == {"pmid"}:
+        return "PMID"
+    if kinds == {"doi"}:
+        return "DOI"
+    return "identifier"
+
+
 def _identifier_label(kind: IdentifierKind, *, plural: bool = False) -> str:
     label = kind.upper()
     if plural:
@@ -566,11 +759,18 @@ def _identifier_label(kind: IdentifierKind, *, plural: bool = False) -> str:
     return label
 
 
-def _block_identifier_report(block: IdentifierBlock) -> list[dict[str, str]]:
-    return [
-        {"kind": block.kind, "normalized": identifier, "source": block.source}
-        for identifier in block.identifiers
-    ]
+def _block_identifier_report(block: ReplacementBlock) -> list[dict[str, str]]:
+    report: list[dict[str, str]] = []
+    for identifier_block in block.blocks:
+        report.extend(
+            {
+                "kind": identifier_block.kind,
+                "normalized": identifier,
+                "source": identifier_block.source,
+            }
+            for identifier in identifier_block.identifiers
+        )
+    return report
 
 
 def _replace_paragraph_range(paragraph: Paragraph, start: int, end: int, replacement: str) -> None:

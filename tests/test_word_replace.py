@@ -2,6 +2,7 @@ from pathlib import Path
 
 from docx import Document
 
+from pmid2endnote.models import ReferenceRecord
 from pmid2endnote.pubmed import PubMedRecord
 from pmid2endnote.word import ReplacementOptions, replace_pmids_in_docx, scan_docx
 
@@ -28,7 +29,7 @@ def test_word_replacement_preserves_non_pmid_text(tmp_path: Path) -> None:
         records_by_pmid={"12345678": PubMedRecord("12345678", "Smith", "2024")},
     )
 
-    assert _read_paragraph_text(output_docx) == "Before {Smith, 2024 #PMID-12345678} after."
+    assert _read_paragraph_text(output_docx) == "Before {Smith, 2024, PMID-12345678} after."
     assert result.replacements[0]["original_text"] == "PMID: 12345678"
     assert result.backup_path is not None
     assert result.backup_path.exists()
@@ -52,7 +53,7 @@ def test_word_replacement_preserves_first_replaced_run_formatting(tmp_path: Path
     )
 
     output_paragraph = Document(output_docx).paragraphs[0]
-    assert output_paragraph.text == "See {Smith, 2024 #PMID-12345678} now."
+    assert output_paragraph.text == "See {Smith, 2024, PMID-12345678} now."
     assert output_paragraph.runs[1].bold is True
 
 
@@ -67,7 +68,7 @@ def test_unresolved_pmid_handling_leaves_unresolved_text(tmp_path: Path) -> None
         records_by_pmid={"12345678": PubMedRecord("12345678", "Smith", "2024")},
     )
 
-    assert _read_paragraph_text(output_docx) == "{Smith, 2024 #PMID-12345678} [unresolved PMID: 99999999]"
+    assert _read_paragraph_text(output_docx) == "{Smith, 2024, PMID-12345678} [unresolved PMID: 99999999]"
 
 
 def test_dry_run_reports_without_writing_output(tmp_path: Path) -> None:
@@ -82,7 +83,7 @@ def test_dry_run_reports_without_writing_output(tmp_path: Path) -> None:
         options=ReplacementOptions(dry_run=True),
     )
 
-    assert result.replacements[0]["replacement_text"] == "{Smith, 2024 #PMID-12345678}"
+    assert result.replacements[0]["replacement_text"] == "{Smith, 2024, PMID-12345678}"
     assert not output_docx.exists()
     assert _read_paragraph_text(input_docx) == "PMID: 12345678"
 
@@ -138,7 +139,7 @@ def test_parenthetical_single_pmid_replacement(tmp_path: Path) -> None:
         options=ReplacementOptions(scan_parenthetical_pmids=True),
     )
 
-    assert _read_paragraph_text(output_docx) == "Before {Petersen, 1983 #PMID-6426050} after."
+    assert _read_paragraph_text(output_docx) == "Before {Petersen, 1983, PMID-6426050} after."
 
 
 def test_word_replacement_inserts_comment_pmids_at_anchor(tmp_path: Path) -> None:
@@ -159,7 +160,7 @@ def test_word_replacement_inserts_comment_pmids_at_anchor(tmp_path: Path) -> Non
     )
 
     output_document = Document(output_docx)
-    assert output_document.paragraphs[0].text == "before stimulation {Smith, 2024 #PMID-12345678} after"
+    assert output_document.paragraphs[0].text == "before stimulation {Smith, 2024, PMID-12345678} after"
     assert output_document.comments.get(0).text == "Please cite PMID: 12345678"
     assert result.replacements[0]["location"]["part"] == "body"
     assert result.replacements[0]["location"]["comment_id"] == 0
@@ -202,7 +203,7 @@ def test_parenthetical_multi_pmid_replacement(tmp_path: Path) -> None:
 
     assert (
         _read_paragraph_text(output_docx)
-        == "Before {Petersen, 1983 #PMID-6426050;Petersen, 1978 #PMID-104929} after."
+        == "Before {Petersen, 1983, PMID-6426050;Petersen, 1978, PMID-104929} after."
     )
 
 
@@ -220,7 +221,7 @@ def test_parenthetical_unresolved_pmid_stays_outside_braces(tmp_path: Path) -> N
 
     assert (
         _read_paragraph_text(output_docx)
-        == "Before {Petersen, 1983 #PMID-6426050} [unresolved PMID: 999999999] after."
+        == "Before {Petersen, 1983, PMID-6426050} [unresolved PMID: 999999999] after."
     )
 
 
@@ -242,5 +243,114 @@ def test_parenthetical_mode_preserves_surrounding_punctuation(tmp_path: Path) ->
 
     assert (
         _read_paragraph_text(output_docx)
-        == "activity. {A, 1983 #PMID-6426050}, {B, 1978 #PMID-104929}, {C, 1997 #PMID-9036716}."
+        == "activity. {A, 1983, PMID-6426050}, {B, 1978, PMID-104929}, {C, 1997, PMID-9036716}."
+    )
+
+
+def test_square_bracketed_pmid_doi_same_article_deduplicates_and_consumes_wrapper(
+    tmp_path: Path,
+) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    doi = "10.1021/acs.chemrev.3c00409"
+    _save_docx(input_docx, [f"Before [PMID: 38408451; DOI: {doi}] after."])
+    record = ReferenceRecord(
+        citation_key="PMID-38408451",
+        first_author="Wijesundara",
+        year="2024",
+        pmid="38408451",
+        doi=doi,
+    )
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_identifier={
+            ("pmid", "38408451"): record,
+            ("doi", doi): record,
+        },
+    )
+
+    assert _read_paragraph_text(output_docx) == "Before {Wijesundara, 2024, PMID-38408451} after."
+    assert result.replacements[0]["original_text"] == f"[PMID: 38408451; DOI: {doi}]"
+    assert result.replacements[0]["replacement_text"].count("PMID-38408451") == 1
+    assert "#PMID-" not in result.replacements[0]["replacement_text"]
+
+
+def test_unwrapped_adjacent_pmid_doi_same_article_deduplicates(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    doi = "10.1186/s12951-023-01782-w"
+    _save_docx(input_docx, [f"Before PMID: 36737783; DOI: {doi} after."])
+    record = ReferenceRecord(
+        citation_key="PMID-36737783",
+        first_author="Stillman",
+        year="2023",
+        pmid="36737783",
+        doi=doi,
+    )
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_identifier={
+            ("pmid", "36737783"): record,
+            ("doi", doi): record,
+        },
+    )
+
+    assert _read_paragraph_text(output_docx) == "Before {Stillman, 2023, PMID-36737783} after."
+    assert result.replacements[0]["replacement_text"].count("PMID-36737783") == 1
+
+
+def test_parenthetical_labeled_identifier_only_wrapper_is_consumed(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    _save_docx(input_docx, ["Before (PMID: 30826373; PMID: 34866536) after."])
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "30826373": PubMedRecord("30826373", "Zhong", "2019"),
+            "34866536": PubMedRecord("34866536", "Li", "2021"),
+        },
+    )
+
+    assert (
+        _read_paragraph_text(output_docx)
+        == "Before {Zhong, 2019, PMID-30826373;Li, 2021, PMID-34866536} after."
+    )
+
+
+def test_wrapper_with_prose_is_not_consumed(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    _save_docx(input_docx, ["Before [see PMID: 38408451] after."])
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"38408451": PubMedRecord("38408451", "Wijesundara", "2024")},
+    )
+
+    assert _read_paragraph_text(output_docx) == "Before [see {Wijesundara, 2024, PMID-38408451}] after."
+
+
+def test_mixed_resolved_unresolved_wrapper_keeps_unresolved_outside_braces(
+    tmp_path: Path,
+) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    _save_docx(input_docx, ["Before [PMID: 30826373; DOI: 10.9999/unresolved] after."])
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"30826373": PubMedRecord("30826373", "Zhong", "2019")},
+    )
+
+    assert (
+        _read_paragraph_text(output_docx)
+        == "Before {Zhong, 2019, PMID-30826373} [unresolved DOI: 10.9999/unresolved] after."
     )

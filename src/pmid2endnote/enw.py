@@ -58,7 +58,7 @@ def _remove_unmatched_braces(value: str) -> str:
 
 
 def _source_note(record: ReferenceRecord) -> str:
-    parts = list(record.source_identifiers)
+    parts = [f"citation_key:{record.citation_key}", *record.source_identifiers]
     if record.pmid and f"PMID:{record.pmid}" not in parts:
         parts.append(f"PMID:{record.pmid}")
     if record.doi and f"DOI:{record.doi}" not in parts:
@@ -102,6 +102,8 @@ def _has_source_note(text: str, record: ReferenceRecord) -> bool:
         if record.pmid and f"PMID:{record.pmid}" not in note:
             continue
         if record.doi and f"DOI:{record.doi}" not in note:
+            continue
+        if f"citation_key:{record.citation_key}" not in note:
             continue
         if f"metadata_source:{record.metadata_source}" not in note:
             continue

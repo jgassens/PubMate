@@ -63,7 +63,7 @@ Use this mode carefully in numeric-heavy documents and review the generated repo
 EndNote does not get references from the Word document alone. Temporary citations such as this are only placeholders:
 
 ```text
-{Ward, 1983 #PMID-6416259}
+{Ward, 1983, PMID-6416259}
 ```
 
 For EndNote to format them, the matching references must already exist in the open EndNote library. That is why PubMate creates both:
@@ -81,9 +81,8 @@ After running PubMate:
 1. Open EndNote.
 2. Open the target EndNote library.
 3. Import `manuscript.endnote-import.enw` using the EndNote Import option.
-4. In EndNote Temporary Citation preferences, set matching to use Accession Number instead of Record Number.
-5. Open `manuscript.endnote.docx` in Microsoft Word.
-6. Run EndNote > Update Citations and Bibliography.
+4. Open `manuscript.endnote.docx` in Microsoft Word desktop.
+5. Run EndNote > Update Citations and Bibliography.
 
 ## Why Temporary Citations Instead of CWYW Fields
 
@@ -92,10 +91,22 @@ EndNote Cite While You Write citations inside Word are not ordinary text. They a
 PubMate writes EndNote temporary citations instead:
 
 ```text
-{Smith, 2024 #PMID-12345678}
+{Smith, 2024, PMID-12345678}
 ```
 
-EndNote already knows how to scan documents for temporary citations, match them against records in the open library, and convert them into formatted citations and a bibliography.
+PubMate uses EndNote's "Any Text" temporary citation form:
+
+```text
+{Author, Year, citation_key}
+```
+
+It does not use the record-number form:
+
+```text
+{Author, Year #RecordNumber}
+```
+
+That distinction matters. App-controlled keys such as `PMID-6416259` and `DOI-5E8A9C2D4F91` are matching/search text, not printable citation suffixes.
 
 ## Installation
 
@@ -143,7 +154,7 @@ manuscript.endnote.docx
 manuscript.pmid2endnote.report.json
 ```
 
-Then import the `.endnote-import.enw` file into EndNote using the EndNote Import option, configure temporary citation matching to use Accession Number, open the generated `.endnote.docx`, and run EndNote > Update Citations and Bibliography.
+Then import the `.endnote-import.enw` file into EndNote using the EndNote Import option, open the generated `.endnote.docx`, and run EndNote > Update Citations and Bibliography.
 
 ## CLI Reference
 
@@ -215,7 +226,7 @@ PMID: 3139738; PMID: 3126745
 the output document places the temporary citation next to the anchored manuscript text, not inside the comment balloon:
 
 ```text
-stimulation {Harth, 1988 #PMID-3139738;Wolf, 1988 #PMID-3126745}
+stimulation {Harth, 1988, PMID-3139738;Wolf, 1988, PMID-3126745}
 ```
 
 This matters because EndNote scans the document body for temporary citations. It will not reliably format references that exist only inside Word comments.
@@ -255,7 +266,7 @@ If a PMID cannot be resolved through PubMed, PubMate leaves it unchanged by defa
 When a multi-PMID block contains both resolved and unresolved PMIDs, PubMate puts only resolved records inside the EndNote temporary citation braces. Unresolved IDs are kept outside the braces:
 
 ```text
-{Petersen, 1983 #PMID-6426050} [unresolved PMID: 999999999]
+{Petersen, 1983, PMID-6426050} [unresolved PMID: 999999999]
 ```
 
 That protects EndNote from leaving an entire multi-citation group unformatted because one item could not be matched.
@@ -339,7 +350,7 @@ PMID -> PubMed -> EndNote import record
 DOI  -> PubMed PMID lookup first -> DOI metadata fallback -> EndNote import record
 ```
 
-For mixed PMID and DOI documents, PubMate uses `.endnote-import.enw` as the canonical import file because EndNote Tagged Import can carry app-controlled Accession Number/Label keys, PubMed identifiers, DOI fields, URLs, and DOI-only metadata.
+For mixed PMID and DOI documents, PubMate uses `.endnote-import.enw` as the canonical import file because EndNote Tagged Import can carry app-controlled citation keys, PubMed identifiers, DOI fields, URLs, and DOI-only metadata.
 
 The import choice is:
 
@@ -348,8 +359,8 @@ The import choice is:
 The temporary citation key format is:
 
 ```text
-{Ward, 1983 #PMID-6416259}
-{Smith, 2023 #DOI-5E8A9C2D4F91}
+{Ward, 1983, PMID-6416259}
+{Smith, 2023, DOI-5E8A9C2D4F91}
 ```
 
 Raw DOI strings will not be used as temporary citation keys.

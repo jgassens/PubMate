@@ -30,9 +30,8 @@ from pmid2endnote.word import (
 
 ENDNOTE_INSTRUCTIONS = (
     "Open EndNote and import {enw_file} into the target EndNote library using the "
-    "EndNote Import option. In EndNote Temporary Citation preferences, set Use field "
-    "instead of Record Number to Accession Number. Then open {output_docx} in Word "
-    "and run EndNote > Update Citations and Bibliography."
+    "EndNote Import option. Then open {output_docx} in Word desktop and run "
+    "EndNote > Update Citations and Bibliography."
 )
 
 

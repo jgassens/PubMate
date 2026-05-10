@@ -73,7 +73,8 @@ def test_non_dry_run_writes_valid_enw_before_docx_and_reports_status(
     ]
     assert result.report["identifier_statuses"][0]["citation_key"] == "PMID-6426050"
     assert str(enw_file) in result.messages[-1]
-    assert "Accession Number" in result.messages[-1]
+    assert "EndNote Import option" in result.messages[-1]
+    assert "Accession Number" not in result.messages[-1]
 
 
 def test_empty_auxiliary_nbib_does_not_block_docx_when_enw_is_valid(tmp_path: Path, monkeypatch) -> None:
