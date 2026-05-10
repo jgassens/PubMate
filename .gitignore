@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+.DS_Store
+*.backup.docx
+*.pmid2endnote.backup*.docx
+*.endnote.docx
+*.references.nbib
+*.endnote-import.enw
+*.pmid2endnote.report.json
