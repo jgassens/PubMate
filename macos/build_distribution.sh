@@ -5,18 +5,10 @@ SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 cd "$PROJECT_DIR"
 
-PYTHON="${PYTHON:-}"
-if [[ -z "$PYTHON" ]]; then
-  if [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
-    PYTHON="$PROJECT_DIR/.venv/bin/python"
-  else
-    PYTHON="$(command -v python3)"
-  fi
-fi
-
 APP_NAME="PubMate"
 BUNDLE_ID="${MACOS_BUNDLE_ID:-org.pubmate.PubMate}"
 SIGN_IDENTITY="${MACOS_CODESIGN_IDENTITY:--}"
+TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"
 SPARKLE_ENABLED=1
 SPARKLE_FRAMEWORK_PATH="${SPARKLE_FRAMEWORK_PATH:-}"
 SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://jgassens.github.io/PubMate/appcast.xml}"
@@ -38,6 +30,10 @@ while [[ $# -gt 0 ]]; do
     --no-sparkle)
       SPARKLE_ENABLED=0
       shift
+      ;;
+    --target-arch)
+      TARGET_ARCH="$2"
+      shift 2
       ;;
     --sparkle-framework)
       SPARKLE_FRAMEWORK_PATH="$2"
@@ -68,10 +64,11 @@ while [[ $# -gt 0 ]]; do
 Build a distributable PubMate macOS app bundle.
 
 Usage:
-  macos/build_distribution.sh [--no-dmg] [--no-sign] [--no-sparkle] [--identity "Developer ID Application: ..."]
+  macos/build_distribution.sh [--no-dmg] [--no-sign] [--no-sparkle] [--target-arch universal2|arm64|x86_64] [--identity "Developer ID Application: ..."]
 
 Environment:
-  PYTHON                     Python interpreter to build with. Defaults to .venv/bin/python.
+  PYTHON                     Python interpreter to build with. Defaults to .venv-universal/bin/python for universal2 builds, then .venv/bin/python.
+  MACOS_TARGET_ARCH          PyInstaller target architecture. Defaults to universal2.
   MACOS_CODESIGN_IDENTITY    Signing identity. Defaults to ad-hoc signing with "-".
   MACOS_BUNDLE_ID            Bundle identifier. Defaults to org.pubmate.PubMate.
   SPARKLE_FRAMEWORK_PATH     Optional explicit path to Sparkle.framework.
@@ -91,8 +88,31 @@ HELP
   esac
 done
 
+case "$TARGET_ARCH" in
+  universal2|arm64|x86_64)
+    ;;
+  *)
+    echo "Unknown target architecture: $TARGET_ARCH" >&2
+    echo "Use universal2, arm64, or x86_64." >&2
+    exit 2
+    ;;
+esac
+
+PYTHON="${PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
+  if [[ "$TARGET_ARCH" == "universal2" && -x "$PROJECT_DIR/.venv-universal/bin/python" ]]; then
+    PYTHON="$PROJECT_DIR/.venv-universal/bin/python"
+  elif [[ "$TARGET_ARCH" == "universal2" && -x "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12" ]]; then
+    PYTHON="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+  elif [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+    PYTHON="$PROJECT_DIR/.venv/bin/python"
+  else
+    PYTHON="$(command -v python3)"
+  fi
+fi
+
 VERSION="$("$PYTHON" -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-ARCH="$(uname -m)"
+ARCH="$TARGET_ARCH"
 DIST_DIR="$PROJECT_DIR/dist"
 BUILD_ROOT="${PUBMATE_BUILD_ROOT:-/private/tmp/pubmate-build-$VERSION-$ARCH}"
 BUILD_DIR="$BUILD_ROOT/build"
@@ -103,6 +123,45 @@ APP_STAGE_PATH="$STAGE_DIST_DIR/$APP_NAME.app"
 APP_PATH="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/$APP_NAME-$VERSION-macos-$ARCH.dmg"
 DMG_STAGE_PATH="$STAGE_DIST_DIR/$APP_NAME-$VERSION-macos-$ARCH.dmg"
+
+python_binary_for_arch_check() {
+  "$PYTHON" - <<'PY'
+from pathlib import Path
+import sys
+import sysconfig
+
+prefix = sysconfig.get_config_var("PYTHONFRAMEWORKPREFIX")
+framework = sysconfig.get_config_var("PYTHONFRAMEWORK")
+version = sysconfig.get_config_var("VERSION")
+if prefix and framework and version:
+    candidate = Path(prefix) / f"{framework}.framework" / "Versions" / version / framework
+    if candidate.exists():
+        print(candidate)
+        raise SystemExit
+print(sys.executable)
+PY
+}
+
+if [[ "$TARGET_ARCH" == "universal2" ]]; then
+  PYTHON_BINARY="$(python_binary_for_arch_check)"
+  PYTHON_ARCHS="$(lipo -archs "$PYTHON_BINARY" 2>/dev/null || true)"
+  if [[ "$PYTHON_ARCHS" != *"arm64"* || "$PYTHON_ARCHS" != *"x86_64"* ]]; then
+    cat >&2 <<EOF
+Universal2 builds require a universal Python runtime, but this interpreter is not universal:
+  $PYTHON
+  runtime: $PYTHON_BINARY
+  architectures: ${PYTHON_ARCHS:-unknown}
+
+Create a universal packaging venv with:
+  /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 -m venv .venv-universal
+  .venv-universal/bin/python -m pip install -e ".[test,macos]"
+
+Or build a single-architecture package explicitly:
+  macos/build_distribution.sh --target-arch arm64
+EOF
+    exit 1
+  fi
+fi
 
 if ! "$PYTHON" -c 'import PyInstaller' >/dev/null 2>&1; then
   cat >&2 <<EOF
@@ -211,6 +270,7 @@ sign_nested_bundles() {
 "$PYTHON" -m PyInstaller \
   --noconfirm \
   --clean \
+  --target-arch "$TARGET_ARCH" \
   --windowed \
   --name "$APP_NAME" \
   --icon "$ICON_PATH" \
@@ -264,6 +324,11 @@ if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
   plist_set_bool "SUAutomaticallyUpdate" "false"
 fi
 
+"$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test >/dev/null
+if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
+  "$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --sparkle-self-test >/dev/null
+fi
+
 if [[ "$SIGN_APP" -eq 1 ]]; then
   clean_macos_metadata "$APP_STAGE_PATH"
   if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
@@ -271,11 +336,6 @@ if [[ "$SIGN_APP" -eq 1 ]]; then
   fi
   sign_target "$APP_STAGE_PATH"
   codesign --verify --deep --strict --verbose=2 "$APP_STAGE_PATH"
-fi
-
-"$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test >/dev/null
-if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
-  "$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --sparkle-self-test >/dev/null
 fi
 
 if [[ "$CREATE_DMG" -eq 1 ]]; then

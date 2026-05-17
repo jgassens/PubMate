@@ -23,7 +23,14 @@ Outputs:
 
 ```text
 dist/PubMate.app
-dist/PubMate-<version>-macos-<arch>.dmg
+dist/PubMate-<version>-macos-universal2.dmg
+```
+
+The default build target is `universal2`, so the same DMG works on Apple Silicon and Intel Macs. Universal builds require a universal Python runtime. On this Mac, use the python.org framework Python instead of the arm64-only Homebrew Python:
+
+```bash
+/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 -m venv .venv-universal
+.venv-universal/bin/python -m pip install -e ".[test,macos]"
 ```
 
 The default build is ad-hoc signed. That is good for local testing and internal handoff, but it is not notarized.
@@ -80,7 +87,7 @@ Then submit and staple:
 
 ```bash
 MACOS_NOTARY_PROFILE=pubmate-notary \
-  macos/notarize_distribution.sh dist/PubMate-<version>-macos-<arch>.dmg
+  macos/notarize_distribution.sh dist/PubMate-<version>-macos-universal2.dmg
 ```
 
 Or use an App Store Connect API key directly:
@@ -89,7 +96,7 @@ Or use an App Store Connect API key directly:
 MACOS_NOTARY_KEY=/path/to/AuthKey_KEYID.p8 \
 MACOS_NOTARY_KEY_ID=KEYID \
 MACOS_NOTARY_ISSUER=ISSUER-UUID \
-  macos/notarize_distribution.sh dist/PubMate-<version>-macos-<arch>.dmg
+  macos/notarize_distribution.sh dist/PubMate-<version>-macos-universal2.dmg
 ```
 
 The script runs:
@@ -141,7 +148,7 @@ Sparkle does not read the GitHub repository version by itself. It reads a signed
 1. Bump `version` in `pyproject.toml`.
 2. Build with Developer ID signing.
 3. Notarize and staple the DMG.
-4. Upload `dist/PubMate-<version>-macos-<arch>.dmg` to the GitHub release tag `v<version>`.
+4. Upload `dist/PubMate-<version>-macos-universal2.dmg` to the GitHub release tag `v<version>`.
 5. Generate the appcast:
 
 ```bash

@@ -39,9 +39,17 @@ MACOS_CODESIGN_IDENTITY="Developer ID Application: JEREMIAH JOSEPH GASSENSMITH (
   macos/build_distribution.sh
 ```
 
+The default release target is `universal2`. Do not publish an Apple
+Silicon-only DMG unless the user explicitly asks for a single-architecture
+emergency build. A proper Sparkle release should be named like:
+
+```text
+dist/PubMate-<version>-macos-universal2.dmg
+```
+
 4. Notarize and staple the DMG.
 5. Create or update the matching GitHub release tag `v<version>`.
-6. Upload `dist/PubMate-<version>-macos-<arch>.dmg` to that release.
+6. Upload `dist/PubMate-<version>-macos-universal2.dmg` to that release.
 7. Regenerate the Sparkle appcast:
 
 ```bash
@@ -64,5 +72,8 @@ release DMG.
 - The distributable artifact is the DMG, not the loose `dist/PubMate.app` copy.
 - The loose app copy can pick up local Finder/File Provider metadata after
   copying; verify the app inside the DMG for distribution.
+- Universal releases require a universal Python runtime. Use
+  `.venv-universal` created from `/Library/Frameworks/Python.framework` or
+  another universal2 Python, not the arm64-only Homebrew Python.
 - Keep `.references.nbib` auxiliary. The canonical EndNote import file is
   `.endnote-import.enw`.

@@ -7,7 +7,9 @@ cd "$PROJECT_DIR"
 
 PYTHON="${PYTHON:-}"
 if [[ -z "$PYTHON" ]]; then
-  if [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+  if [[ -x "$PROJECT_DIR/.venv-universal/bin/python" ]]; then
+    PYTHON="$PROJECT_DIR/.venv-universal/bin/python"
+  elif [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
     PYTHON="$PROJECT_DIR/.venv/bin/python"
   else
     PYTHON="$(command -v python3)"
@@ -15,7 +17,8 @@ if [[ -z "$PYTHON" ]]; then
 fi
 
 VERSION="$("$PYTHON" -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-ARCH="$(uname -m)"
+TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"
+ARCH="$TARGET_ARCH"
 GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-jgassens/PubMate}"
 GITHUB_RELEASE_TAG="${GITHUB_RELEASE_TAG:-v$VERSION}"
 DMG_PATH="${DMG_PATH:-$PROJECT_DIR/dist/PubMate-$VERSION-macos-$ARCH.dmg}"
@@ -75,7 +78,7 @@ mkdir -p "$UPDATES_DIR" "${APPCAST_OUTPUT:h}"
 ARCHIVE_NAME="${SPARKLE_ARCHIVE_NAME:-${DMG_PATH:t}}"
 ARCHIVE_PATH="$UPDATES_DIR/$ARCHIVE_NAME"
 ARCHIVE_BASE="${ARCHIVE_NAME:r}"
-rm -f "$UPDATES_DIR/appcast.xml"
+rm -f "$UPDATES_DIR"/*.dmg(N) "$UPDATES_DIR"/*.delta(N) "$UPDATES_DIR"/appcast.xml
 ditto --norsrc --noextattr "$DMG_PATH" "$ARCHIVE_PATH"
 
 if [[ -n "$RELEASE_NOTES_PATH" ]]; then

@@ -67,6 +67,10 @@ def test_build_script_embeds_sparkle_metadata() -> None:
     assert "SUPublicEDKey" in text
     assert "SUEnableAutomaticChecks" in text
     assert "--sparkle-self-test" in text
+    assert 'TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"' in text
+    assert "--target-arch" in text
+    assert "Universal2 builds require a universal Python runtime" in text
+    assert text.index("--sparkle-self-test") < text.index("codesign --verify --deep --strict")
 
 
 def test_sparkle_appcast_helper_targets_github_releases() -> None:
@@ -74,6 +78,9 @@ def test_sparkle_appcast_helper_targets_github_releases() -> None:
     assert "jgassens/PubMate" in text
     assert "releases/download" in text
     assert 'DOWNLOAD_URL_PREFIX="$DOWNLOAD_URL_PREFIX/"' in text
+    assert 'TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"' in text
+    assert ".venv-universal/bin/python" in text
+    assert 'rm -f "$UPDATES_DIR"/*.dmg(N) "$UPDATES_DIR"/*.delta(N)' in text
     assert "generate_appcast" in text
     assert "docs/appcast.xml" in text
 

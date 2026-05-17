@@ -258,14 +258,16 @@ This creates:
 
 ```text
 dist/PubMate.app
-dist/PubMate-<version>-macos-<arch>.dmg
+dist/PubMate-<version>-macos-universal2.dmg
 ```
 
-The app uses native macOS dialogs and the same processing engine as the CLI. The default build is ad-hoc signed for local testing. For public distribution, build with a Developer ID certificate and notarize the DMG:
+The app uses native macOS dialogs and the same processing engine as the CLI. The default release build is universal2, so the same DMG runs on Apple Silicon and Intel Macs. For universal builds, use a universal Python runtime such as the python.org framework build; an arm64-only Homebrew Python can only create an Apple Silicon-only app.
+
+The default build is ad-hoc signed for local testing. For public distribution, build with a Developer ID certificate and notarize the DMG:
 
 ```bash
 MACOS_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" macos/build_distribution.sh
-MACOS_NOTARY_PROFILE=pubmate-notary macos/notarize_distribution.sh dist/PubMate-<version>-macos-<arch>.dmg
+MACOS_NOTARY_PROFILE=pubmate-notary macos/notarize_distribution.sh dist/PubMate-<version>-macos-universal2.dmg
 ```
 
 The DMG is the primary distribution artifact. The notarization helper also supports App Store Connect API key credentials through `MACOS_NOTARY_KEY`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER`; those credentials submit to Apple, but the app still needs a Developer ID Application certificate for public notarized distribution.
