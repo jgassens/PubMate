@@ -61,6 +61,8 @@ class ProcessingOptions:
     scan_parenthetical_pmids: bool = False
     scan_dois: bool = True
     scan_bare_dois: bool = False
+    skip_reference_section: bool = True
+    create_backup: bool = False
     doi_source: str = "auto"
     import_format: str = "enw"
     save_email: bool = True
@@ -107,6 +109,8 @@ def process_document(
     report["doi_source"] = options.doi_source
     report["import_format"] = options.import_format
     report["include_comments"] = options.include_comments
+    report["skip_reference_section"] = options.skip_reference_section
+    report["create_backup"] = options.create_backup
 
     if options.import_format != "enw":
         message = "Only EndNote Tagged Import format is supported: --import-format enw"
@@ -126,6 +130,8 @@ def process_document(
         scan_parenthetical_pmids=options.scan_parenthetical_pmids,
         scan_dois=options.scan_dois,
         scan_bare_dois=options.scan_bare_dois,
+        skip_reference_section=options.skip_reference_section,
+        create_backup=options.create_backup,
     )
 
     try:
@@ -137,6 +143,8 @@ def process_document(
         return ProcessingResult(2, report, output_docx, nbib_file, enw_file, report_file, (str(exc),))
 
     report["warnings"].extend(scan_result.warnings)
+    report["reference_section_start"] = scan_result.reference_section_start
+    report["skipped_identifiers"] = scan_result.skipped_identifiers
     report["unique_pmids"] = scan_result.unique_pmids
     report["unique_identifiers"] = [
         {"kind": kind, "normalized": value} for kind, value in scan_result.unique_identifiers
@@ -151,12 +159,16 @@ def process_document(
 
     if not scan_result.unique_identifiers:
         write_report(report, report_file)
-        messages.extend(
-            [
-                "No matching PMID or DOI blocks were found. No Word or EndNote files were written.",
-                f"Wrote report: {report_file}",
-            ]
-        )
+        if scan_result.skipped_identifiers:
+            messages.append(
+                "No processable PMID or DOI blocks were found outside the detected reference section. "
+                "No Word or EndNote files were written."
+            )
+        else:
+            messages.append(
+                "No matching PMID or DOI blocks were found. No Word or EndNote files were written."
+            )
+        messages.append(f"Wrote report: {report_file}")
         return ProcessingResult(0, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
 
     email = resolve_email(options.email)

@@ -4,7 +4,12 @@ from docx import Document
 
 from pmid2endnote.models import ReferenceRecord
 from pmid2endnote.pubmed import PubMedRecord
-from pmid2endnote.word import ReplacementOptions, replace_pmids_in_docx, scan_docx
+from pmid2endnote.word import (
+    ReplacementOptions,
+    is_reference_section_heading,
+    replace_pmids_in_docx,
+    scan_docx,
+)
 
 
 def _save_docx(path: Path, paragraphs: list[str]) -> None:
@@ -16,6 +21,23 @@ def _save_docx(path: Path, paragraphs: list[str]) -> None:
 
 def _read_paragraph_text(path: Path, index: int = 0) -> str:
     return Document(path).paragraphs[index].text
+
+
+def test_reference_section_heading_detection() -> None:
+    triggers = [
+        "References",
+        "Bibliography",
+        "Works Cited",
+        "Literature Cited",
+        "References Cited",
+        "1. References",
+        "VII. References",
+    ]
+
+    for text in triggers:
+        assert is_reference_section_heading(text)
+
+    assert not is_reference_section_heading("References to previous work are discussed here")
 
 
 def test_word_replacement_preserves_non_pmid_text(tmp_path: Path) -> None:
@@ -31,8 +53,25 @@ def test_word_replacement_preserves_non_pmid_text(tmp_path: Path) -> None:
 
     assert _read_paragraph_text(output_docx) == "Before {Smith, 2024, PMID-12345678} after."
     assert result.replacements[0]["original_text"] == "PMID: 12345678"
+    assert result.backup_path is None
+    assert not list(tmp_path.glob("*.backup*.docx"))
+
+
+def test_word_replacement_can_create_backup_when_requested(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    _save_docx(input_docx, ["Before PMID: 12345678 after."])
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Smith", "2024")},
+        options=ReplacementOptions(create_backup=True),
+    )
+
     assert result.backup_path is not None
     assert result.backup_path.exists()
+    assert _read_paragraph_text(result.backup_path) == "Before PMID: 12345678 after."
 
 
 def test_word_replacement_preserves_first_replaced_run_formatting(tmp_path: Path) -> None:
@@ -165,6 +204,117 @@ def test_word_replacement_inserts_comment_pmids_at_anchor(tmp_path: Path) -> Non
     assert result.replacements[0]["location"]["part"] == "body"
     assert result.replacements[0]["location"]["comment_id"] == 0
     assert result.replacements[0]["location"]["source_part"] == "comment"
+
+
+def test_reference_section_identifiers_are_skipped_by_default(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    _save_docx(
+        input_docx,
+        [
+            "Before PMID: 12345678.",
+            "References",
+            "1. Example article. PMID: 99999999. DOI: 10.1021/acs.chemrev.3c00409.",
+        ],
+    )
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_pmids == ["12345678"]
+    assert scan.reference_section_start == {"part": "body", "paragraph_index": 1}
+    assert {item["normalized"] for item in scan.skipped_identifiers} == {
+        "99999999",
+        "10.1021/acs.chemrev.3c00409",
+    }
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "12345678": PubMedRecord("12345678", "Smith", "2024"),
+            "99999999": PubMedRecord("99999999", "Wrong", "2020"),
+        },
+    )
+
+    output_document = Document(output_docx)
+    assert output_document.paragraphs[0].text == "Before {Smith, 2024, PMID-12345678}."
+    assert output_document.paragraphs[2].text == (
+        "1. Example article. PMID: 99999999. DOI: 10.1021/acs.chemrev.3c00409."
+    )
+
+
+def test_reference_section_skip_can_be_disabled(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    _save_docx(input_docx, ["References", "PMID: 99999999"])
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"99999999": PubMedRecord("99999999", "Smith", "2020")},
+        options=ReplacementOptions(skip_reference_section=False),
+    )
+
+    assert _read_paragraph_text(output_docx, 1) == "{Smith, 2020, PMID-99999999}"
+
+
+def test_tables_after_reference_section_are_skipped(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    before_table = document.add_table(rows=1, cols=1)
+    before_table.cell(0, 0).text = "PMID: 12345678"
+    document.add_paragraph("References")
+    after_table = document.add_table(rows=1, cols=1)
+    after_table.cell(0, 0).text = "PMID: 99999999"
+    document.save(input_docx)
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_pmids == ["12345678"]
+    assert [item["normalized"] for item in scan.skipped_identifiers] == ["99999999"]
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "12345678": PubMedRecord("12345678", "Before", "2024"),
+            "99999999": PubMedRecord("99999999", "After", "2020"),
+        },
+    )
+
+    output_document = Document(output_docx)
+    assert output_document.tables[0].cell(0, 0).text == "{Before, 2024, PMID-12345678}"
+    assert output_document.tables[1].cell(0, 0).text == "PMID: 99999999"
+
+
+def test_comments_anchored_after_reference_section_are_skipped(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    before = document.add_paragraph()
+    before_anchor = before.add_run("before")
+    document.add_comment(before_anchor, text="Please cite PMID: 12345678", author="Reviewer")
+    document.add_paragraph("References")
+    after = document.add_paragraph()
+    after_anchor = after.add_run("after")
+    document.add_comment(after_anchor, text="Please cite PMID: 99999999", author="Reviewer")
+    document.save(input_docx)
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_pmids == ["12345678"]
+    assert [item["normalized"] for item in scan.skipped_identifiers] == ["99999999"]
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "12345678": PubMedRecord("12345678", "Before", "2024"),
+            "99999999": PubMedRecord("99999999", "After", "2020"),
+        },
+    )
+
+    output_document = Document(output_docx)
+    assert output_document.paragraphs[0].text == "before {Before, 2024, PMID-12345678}"
+    assert output_document.paragraphs[2].text == "after"
 
 
 def test_word_replacement_can_skip_comment_anchor_insertions(tmp_path: Path) -> None:

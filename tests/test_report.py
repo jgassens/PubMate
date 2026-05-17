@@ -25,6 +25,7 @@ def test_report_json_creation(tmp_path: Path) -> None:
     assert loaded["pmid_statuses"] == []
     assert loaded["replacements"] == []
     assert loaded["errors"] == []
+    assert loaded["create_backup"] is False
 
 
 def test_pmid_statuses_include_sources_resolution_inclusion_and_replacement_count() -> None:
@@ -44,6 +45,8 @@ def test_pmid_statuses_include_sources_resolution_inclusion_and_replacement_coun
             ("pmid", "999999999"),
         ],
         warnings=[],
+        skipped_identifiers=[],
+        reference_section_start=None,
     )
     statuses = build_pmid_statuses(
         scan_result=scan_result,

@@ -31,6 +31,28 @@ from pmid2endnote.scanner import (
 
 IdentifierKey = tuple[IdentifierKind, str]
 
+REFERENCE_SECTION_HEADINGS = {
+    "references",
+    "bibliography",
+    "works cited",
+    "literature cited",
+    "references cited",
+}
+
+REFERENCE_HEADING_PREFIX_RE = re.compile(
+    r"""
+    ^
+    (?:
+        \d+
+        |
+        [ivxlcdm]+
+    )
+    [.)]?
+    \s+
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 
 @dataclass(frozen=True)
 class ReplacementBlock:
@@ -82,6 +104,25 @@ class TextLocation:
 
 
 @dataclass(frozen=True)
+class ScannableParagraph:
+    """A paragraph-like Word location with reference-section skip state."""
+
+    paragraph: Paragraph
+    location: TextLocation
+    skipped_by_reference_section: bool = False
+
+
+@dataclass(frozen=True)
+class ReferenceSectionContext:
+    """Reference-section metadata used for body/table/comment filtering."""
+
+    paragraphs: list[ScannableParagraph]
+    reference_section_start: dict[str, Any] | None
+    anchor_locations: dict[int, tuple[Paragraph, TextLocation]]
+    skipped_comment_ids: set[int]
+
+
+@dataclass(frozen=True)
 class DocumentPmidOccurrence:
     """An identifier block found in a Word paragraph-like location."""
 
@@ -104,6 +145,8 @@ class ReplacementOptions:
     scan_parenthetical_pmids: bool = False
     scan_dois: bool = True
     scan_bare_dois: bool = False
+    skip_reference_section: bool = True
+    create_backup: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,6 +157,8 @@ class ScanResult:
     unique_pmids: list[str]
     unique_identifiers: list[IdentifierKey]
     warnings: list[str]
+    skipped_identifiers: list[dict[str, Any]]
+    reference_section_start: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -150,6 +195,15 @@ def validate_input_docx(path: Path) -> None:
         raise InputDocumentError(f"Input file must be a .docx document: {path}")
 
 
+def is_reference_section_heading(text: str) -> bool:
+    """Return True for conservative standalone bibliography headings."""
+
+    normalized = " ".join(text.strip().split())
+    normalized = normalized.strip(" \t\r\n:;.").lower()
+    normalized = REFERENCE_HEADING_PREFIX_RE.sub("", normalized).strip()
+    return normalized in REFERENCE_SECTION_HEADINGS
+
+
 def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResult:
     """Scan a .docx document for PMID blocks."""
 
@@ -158,8 +212,59 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
     document = _open_document(path)
     warnings: list[str] = []
     occurrences: list[DocumentPmidOccurrence] = []
+    skipped_identifiers: list[dict[str, Any]] = []
+    context = _reference_section_context(document, options)
 
-    for paragraph, location in _iter_scannable_paragraphs(document, options):
+    for item in context.paragraphs:
+        paragraph = item.paragraph
+        location = item.location
+        blocks = scan_text(
+            paragraph.text,
+            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
+            scan_dois=options.scan_dois,
+            scan_bare_dois=options.scan_bare_dois,
+        )
+        if not blocks:
+            continue
+        if item.skipped_by_reference_section:
+            skipped_identifiers.extend(
+                _skipped_identifier_reports(blocks, location, reason="reference_section")
+            )
+            continue
+        if _paragraph_has_unsafe_fields(paragraph):
+            warnings.append(
+                "Skipped PMID block in paragraph with field or hidden text content at "
+                f"{location.part} paragraph {location.paragraph_index}."
+            )
+            continue
+        occurrences.extend(DocumentPmidOccurrence(block=block, location=location) for block in blocks)
+
+    if options.include_comments:
+        for paragraph, location in _iter_comment_paragraphs(document, options):
+            blocks = scan_text(
+                paragraph.text,
+                scan_parenthetical_pmids=options.scan_parenthetical_pmids,
+                scan_dois=options.scan_dois,
+                scan_bare_dois=options.scan_bare_dois,
+            )
+            if not blocks:
+                continue
+            if location.comment_id in context.skipped_comment_ids:
+                skipped_identifiers.extend(
+                    _skipped_identifier_reports(blocks, location, reason="reference_section")
+                )
+                continue
+            if _paragraph_has_unsafe_fields(paragraph):
+                warnings.append(
+                    "Skipped PMID block in paragraph with field or hidden text content at "
+                    f"{location.part} paragraph {location.paragraph_index}."
+                )
+                continue
+            occurrences.extend(
+                DocumentPmidOccurrence(block=block, location=location) for block in blocks
+            )
+
+    for paragraph, location in _iter_header_footer_paragraphs(document, options):
         blocks = scan_text(
             paragraph.text,
             scan_parenthetical_pmids=options.scan_parenthetical_pmids,
@@ -176,6 +281,12 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
             continue
         occurrences.extend(DocumentPmidOccurrence(block=block, location=location) for block in blocks)
 
+    if skipped_identifiers:
+        warnings.append(
+            f"Skipped {len(skipped_identifiers)} identifier block"
+            f"{'' if len(skipped_identifiers) == 1 else 's'} in the detected reference section."
+        )
+
     if options.include_footnotes:
         warnings.append(
             "Footnotes were requested, but python-docx does not expose footnotes for safe "
@@ -189,6 +300,8 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
             occurrence.block for occurrence in occurrences
         ),
         warnings=warnings,
+        skipped_identifiers=skipped_identifiers,
+        reference_section_start=context.reference_section_start,
     )
 
 
@@ -211,11 +324,14 @@ def replace_pmids_in_docx(
     document = _open_document(input_docx)
     warnings: list[str] = []
     replacements: list[dict[str, Any]] = []
+    context = _reference_section_context(document, options)
 
-    for paragraph, location in _iter_scannable_paragraphs(document, options, include_comments=False):
+    for item in context.paragraphs:
+        if item.skipped_by_reference_section:
+            continue
         paragraph_replacements, paragraph_warnings = _replace_paragraph_blocks(
-            paragraph=paragraph,
-            location=location,
+            paragraph=item.paragraph,
+            location=item.location,
             records_by_identifier=resolved_records,
             keep_pmid_text=options.keep_pmid_text,
             mark_unresolved=options.mark_unresolved,
@@ -232,9 +348,25 @@ def replace_pmids_in_docx(
             document=document,
             options=options,
             records_by_identifier=resolved_records,
+            context=context,
         )
         replacements.extend(comment_replacements)
         warnings.extend(comment_warnings)
+
+    for paragraph, location in _iter_header_footer_paragraphs(document, options):
+        paragraph_replacements, paragraph_warnings = _replace_paragraph_blocks(
+            paragraph=paragraph,
+            location=location,
+            records_by_identifier=resolved_records,
+            keep_pmid_text=options.keep_pmid_text,
+            mark_unresolved=options.mark_unresolved,
+            dry_run=options.dry_run,
+            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
+            scan_dois=options.scan_dois,
+            scan_bare_dois=options.scan_bare_dois,
+        )
+        replacements.extend(paragraph_replacements)
+        warnings.extend(paragraph_warnings)
 
     if options.include_footnotes:
         warnings.append(
@@ -247,7 +379,8 @@ def replace_pmids_in_docx(
     backup_path: Path | None = None
     if not options.dry_run:
         output_docx.parent.mkdir(parents=True, exist_ok=True)
-        backup_path = _create_backup(input_docx)
+        if options.create_backup:
+            backup_path = _create_backup(input_docx)
         document.save(output_docx)
 
     return ReplacementResult(
@@ -279,27 +412,65 @@ def _coerce_records_by_identifier(
     }
 
 
-def _iter_scannable_paragraphs(
+def _reference_section_context(
     document: DocxDocument,
     options: ReplacementOptions,
-    *,
-    include_comments: bool = True,
+) -> ReferenceSectionContext:
+    paragraphs: list[ScannableParagraph] = []
+    reference_section_start: dict[str, Any] | None = None
+    in_reference_section = False
+    anchor_locations: dict[int, tuple[Paragraph, TextLocation]] = {}
+    skipped_comment_ids: set[int] = set()
+
+    for paragraph, location in _iter_body_table_paragraphs_in_order(document, options):
+        if (
+            options.skip_reference_section
+            and not in_reference_section
+            and is_reference_section_heading(paragraph.text)
+        ):
+            in_reference_section = True
+            reference_section_start = location.as_report_dict()
+        paragraphs.append(
+            ScannableParagraph(
+                paragraph=paragraph,
+                location=location,
+                skipped_by_reference_section=in_reference_section,
+            )
+        )
+        for comment_id in _comment_ids_in_paragraph(paragraph):
+            if in_reference_section and options.skip_reference_section:
+                skipped_comment_ids.add(comment_id)
+            else:
+                anchor_locations.setdefault(comment_id, (paragraph, location))
+
+    return ReferenceSectionContext(
+        paragraphs=paragraphs,
+        reference_section_start=reference_section_start,
+        anchor_locations=anchor_locations,
+        skipped_comment_ids=skipped_comment_ids,
+    )
+
+
+def _iter_body_table_paragraphs_in_order(
+    document: DocxDocument,
+    options: ReplacementOptions,
 ) -> Iterator[tuple[Paragraph, TextLocation]]:
     body_index = 0
-    for paragraph in document.paragraphs:
-        yield paragraph, TextLocation(part="body", paragraph_index=body_index)
-        body_index += 1
-
-    if options.include_tables:
-        table_index = 0
-        for table in document.tables:
+    table_index = 0
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, document), TextLocation(part="body", paragraph_index=body_index)
+            body_index += 1
+        elif child.tag == qn("w:tbl") and options.include_tables:
+            table = Table(child, document)
             for paragraph in _iter_table_paragraphs(table):
                 yield paragraph, TextLocation(part="table", paragraph_index=table_index)
                 table_index += 1
 
-    if include_comments:
-        yield from _iter_comment_paragraphs(document, options)
-
+def _iter_header_footer_paragraphs(
+    document: DocxDocument,
+    options: ReplacementOptions,
+) -> Iterator[tuple[Paragraph, TextLocation]]:
     if options.include_headers:
         header_index = 0
         for section in document.sections:
@@ -313,6 +484,23 @@ def _iter_scannable_paragraphs(
             for paragraph in section.footer.paragraphs:
                 yield paragraph, TextLocation(part="footer", paragraph_index=footer_index)
                 footer_index += 1
+
+
+def _iter_scannable_paragraphs(
+    document: DocxDocument,
+    options: ReplacementOptions,
+    *,
+    include_comments: bool = True,
+) -> Iterator[tuple[Paragraph, TextLocation]]:
+    context = _reference_section_context(document, options)
+    for item in context.paragraphs:
+        if not item.skipped_by_reference_section:
+            yield item.paragraph, item.location
+    if include_comments:
+        for paragraph, location in _iter_comment_paragraphs(document, options):
+            if location.comment_id not in context.skipped_comment_ids:
+                yield paragraph, location
+    yield from _iter_header_footer_paragraphs(document, options)
 
 
 def _iter_table_paragraphs(table: Table) -> Iterator[Paragraph]:
@@ -433,12 +621,15 @@ def _insert_comment_pmids_at_anchors(
     document: DocxDocument,
     options: ReplacementOptions,
     records_by_identifier: dict[IdentifierKey, ReferenceRecord],
+    context: ReferenceSectionContext,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    anchor_locations = _comment_anchor_locations(document, options)
+    anchor_locations = context.anchor_locations
     planned_by_comment: dict[int, list[tuple[ReplacementBlock, str, TextLocation]]] = {}
     warnings: list[str] = []
 
     for paragraph, comment_location in _iter_comment_paragraphs(document, options):
+        if comment_location.comment_id in context.skipped_comment_ids:
+            continue
         blocks = _replacement_blocks_for_text(
             paragraph.text,
             scan_parenthetical_pmids=options.scan_parenthetical_pmids,
@@ -516,11 +707,7 @@ def _comment_anchor_locations(
     document: DocxDocument,
     options: ReplacementOptions,
 ) -> dict[int, tuple[Paragraph, TextLocation]]:
-    anchors: dict[int, tuple[Paragraph, TextLocation]] = {}
-    for paragraph, location in _iter_scannable_paragraphs(document, options, include_comments=False):
-        for comment_id in _comment_ids_in_paragraph(paragraph):
-            anchors.setdefault(comment_id, (paragraph, location))
-    return anchors
+    return _reference_section_context(document, options).anchor_locations
 
 
 def _comment_ids_in_paragraph(paragraph: Paragraph) -> Iterator[int]:
@@ -771,6 +958,28 @@ def _block_identifier_report(block: ReplacementBlock) -> list[dict[str, str]]:
             for identifier in identifier_block.identifiers
         )
     return report
+
+
+def _skipped_identifier_reports(
+    blocks: list[IdentifierBlock],
+    location: TextLocation,
+    *,
+    reason: str,
+) -> list[dict[str, Any]]:
+    skipped: list[dict[str, Any]] = []
+    for block in blocks:
+        for identifier in block.identifiers:
+            skipped.append(
+                {
+                    "original_text": block.original_text,
+                    "kind": block.kind,
+                    "normalized": identifier,
+                    "source": block.source,
+                    "location": location.as_report_dict(),
+                    "reason": reason,
+                }
+            )
+    return skipped
 
 
 def _replace_paragraph_range(paragraph: Paragraph, start: int, end: int, replacement: str) -> None:

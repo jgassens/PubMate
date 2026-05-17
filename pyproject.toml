@@ -20,6 +20,10 @@ dependencies = [
 test = [
   "pytest>=8.0.0"
 ]
+macos = [
+  "pyinstaller>=6.0",
+  "pyobjc-framework-Cocoa>=11.0"
+]
 
 [project.scripts]
 pmid2endnote = "pmid2endnote.cli:main"

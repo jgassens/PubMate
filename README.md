@@ -18,7 +18,11 @@ The current working path supports PMIDs plus DOI labels and DOI resolver URLs:
 6. Replace identifier markers in the Word document with EndNote temporary citations.
 7. Write a JSON report describing every identifier, replacement, warning, and error.
 
+By default, PubMate ignores PMIDs and DOIs in the document's final reference section. Once it sees a standalone heading such as `References`, `Bibliography`, `Works Cited`, `Literature Cited`, or `References Cited`, identifiers from that point to the end of the document are reported as skipped and are not fetched, imported, or replaced.
+
 PubMate also supports a macOS-friendly launcher flow and scans Word comments by default. When a PMID appears in a Word comment, the generated EndNote temporary citation is inserted at the comment anchor in the actual document body, because EndNote cannot format citations that live only inside comment balloons.
+
+The input `.docx` is not modified. PubMate writes a separate `.endnote.docx` output file instead. Backup copies are therefore disabled by default and are only created when requested with `--backup`.
 
 `.references.nbib` may also be generated for PubMed records, but it is auxiliary. `.endnote-import.enw` is the file to import into EndNote.
 
@@ -57,6 +61,30 @@ For manuscripts that use raw PMID placeholders, parenthetical scanning is availa
 ```
 
 Use this mode carefully in numeric-heavy documents and review the generated report.
+
+## Reference Section Skipping
+
+Manuscripts often contain PMIDs and DOIs in an existing reference list. Those are bibliographic metadata, not citation placeholders, so converting them would create duplicate citations in the reference section.
+
+PubMate skips reference-section identifiers by default. The skipped region starts at a standalone heading such as:
+
+```text
+References
+Bibliography
+Works Cited
+Literature Cited
+References Cited
+1. References
+VII. References
+```
+
+The skipped region continues to the end of the document. Skipped identifiers are written to `skipped_identifiers` in the JSON report with their text, normalized ID, source, location, and reason. They are intentionally excluded from PubMed/DOI lookup, `.endnote-import.enw`, `.references.nbib`, Word replacements, and `identifier_statuses`.
+
+If a document has an unusual structure and you really do want to process identifiers after a reference heading, use:
+
+```bash
+python -m pmid2endnote manuscript.docx --email name@university.edu --no-skip-reference-section
+```
 
 ## EndNote Handoff: Why Two Files Are Required
 
@@ -184,6 +212,8 @@ Useful options:
 --scan-dois
 --no-scan-dois
 --scan-bare-dois
+--no-skip-reference-section
+--backup
 --doi-source auto|pubmed-first|crossref|datacite|content-negotiation
 --import-format enw
 --keep-pmid-text
@@ -191,7 +221,9 @@ Useful options:
 --style temporary
 ```
 
-Tables and Word comments are included by default. Headers and footers are opt-in. Footnotes are not safely exposed by `python-docx`; if requested, PubMate records a limitation warning in the report.
+Tables, Word comments, and reference-section skipping are included by default. Headers and footers are opt-in. Footnotes are not safely exposed by `python-docx`; if requested, PubMate records a limitation warning in the report.
+
+The original input document is left untouched. `--backup` is available if you want an extra safety copy, but it is not needed for the normal workflow because PubMate writes changes only to the separate `.endnote.docx` file.
 
 ## macOS Launcher
 
@@ -203,6 +235,8 @@ macos/PMID2EndNote.command
 
 The launcher uses built-in macOS dialogs to choose a Word file and enter the PubMed email/API key. It runs the same processing code as the CLI.
 
+Each run also asks whether to scan raw parenthetical PMID placeholders and whether to ignore identifiers after a References/Bibliography heading. The reference-section skip prompt defaults to Yes.
+
 The first time PubMate needs PubMed access, it asks for an email address and saves it here:
 
 ```text
@@ -210,6 +244,47 @@ The first time PubMate needs PubMed access, it asks for an email address and sav
 ```
 
 Future runs reuse that saved email. You can override it from the CLI with `--email`, or set `PMID2ENDNOTE_EMAIL` in your shell.
+
+## macOS App Distribution
+
+For a more Mac-like handoff, PubMate can be packaged as a double-clickable app bundle:
+
+```bash
+pip install -e ".[test,macos]"
+macos/build_distribution.sh
+```
+
+This creates:
+
+```text
+dist/PubMate.app
+dist/PubMate-<version>-macos-<arch>.dmg
+```
+
+The app uses native macOS dialogs and the same processing engine as the CLI. The default build is ad-hoc signed for local testing. For public distribution, build with a Developer ID certificate and notarize the DMG:
+
+```bash
+MACOS_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" macos/build_distribution.sh
+MACOS_NOTARY_PROFILE=pubmate-notary macos/notarize_distribution.sh dist/PubMate-<version>-macos-<arch>.dmg
+```
+
+The DMG is the primary distribution artifact. The notarization helper also supports App Store Connect API key credentials through `MACOS_NOTARY_KEY`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER`; those credentials submit to Apple, but the app still needs a Developer ID Application certificate for public notarized distribution.
+
+The packaged app includes Sparkle auto-update support. PubMate checks the GitHub-hosted appcast at:
+
+```text
+https://jgassens.github.io/PubMate/appcast.xml
+```
+
+When you publish a new version, build and notarize the DMG, upload that DMG to the matching GitHub release, and regenerate the appcast:
+
+```bash
+macos/prepare_sparkle_appcast.sh
+```
+
+Commit and publish the updated `docs/appcast.xml` through GitHub Pages. Sparkle uses that appcast plus the signed DMG to decide whether installed copies should update.
+
+See [docs/macos-distribution.md](docs/macos-distribution.md) for the full release checklist.
 
 ## Word Comments
 
@@ -311,6 +386,8 @@ The report includes:
 - total PMID and identifier occurrences
 - unique PMIDs in first-seen document order
 - unique identifiers in first-seen document order
+- reference-section skip settings and detected heading location
+- skipped reference-section identifiers
 - resolved and unresolved PMIDs
 - per-identifier status information
 - per-PMID status information

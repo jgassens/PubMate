@@ -48,6 +48,8 @@ class PMID2EndNoteGUI:
         self.keep_pmid_text = tk.BooleanVar(value=False)
         self.mark_unresolved = tk.BooleanVar(value=False)
         self.scan_parenthetical_pmids = tk.BooleanVar(value=False)
+        self.skip_reference_section = tk.BooleanVar(value=True)
+        self.create_backup = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="Choose a .docx file to begin.")
 
         self._queue: queue.Queue[tuple[str, str | ProcessingResult]] = queue.Queue()
@@ -115,6 +117,16 @@ class PMID2EndNoteGUI:
             text="Parenthetical PMIDs",
             variable=self.scan_parenthetical_pmids,
         ).grid(row=2, column=0, sticky="w")
+        ttk.Checkbutton(
+            checks,
+            text="Skip References/Bibliography",
+            variable=self.skip_reference_section,
+        ).grid(row=2, column=1, columnspan=2, sticky="w")
+        ttk.Checkbutton(
+            checks,
+            text="Create input backup",
+            variable=self.create_backup,
+        ).grid(row=2, column=3, sticky="w")
 
         output = ttk.LabelFrame(main, text="Run Log", padding=12)
         output.grid(row=4, column=0, sticky="nsew")
@@ -223,6 +235,8 @@ class PMID2EndNoteGUI:
             keep_pmid_text=self.keep_pmid_text.get(),
             mark_unresolved=self.mark_unresolved.get(),
             scan_parenthetical_pmids=self.scan_parenthetical_pmids.get(),
+            skip_reference_section=self.skip_reference_section.get(),
+            create_backup=self.create_backup.get(),
         )
 
         thread = threading.Thread(target=self._run_worker, args=(options,), daemon=True)

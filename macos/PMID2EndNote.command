@@ -71,6 +71,16 @@ end try
 APPLESCRIPT
 )"
 
+SKIP_REFERENCE_SECTION="$(osascript <<'APPLESCRIPT'
+try
+  set dialogResult to display dialog "Ignore PMIDs/DOIs after a References/Bibliography heading?" buttons {"No", "Yes"} default button "Yes"
+  return button returned of dialogResult
+on error number -128
+  return "Yes"
+end try
+APPLESCRIPT
+)"
+
 echo "Running PMID2EndNote..."
 echo "Input: $INPUT_DOCX"
 echo
@@ -83,6 +93,10 @@ fi
 
 if [[ "$SCAN_PARENTHESES" == "Yes" ]]; then
   ARGS+=("--scan-parenthetical-pmids")
+fi
+
+if [[ "$SKIP_REFERENCE_SECTION" == "No" ]]; then
+  ARGS+=("--no-skip-reference-section")
 fi
 
 set +e

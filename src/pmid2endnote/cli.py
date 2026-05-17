@@ -99,6 +99,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also scan bare DOI strings like 10.1000/example. Disabled by default.",
     )
     parser.add_argument(
+        "--skip-reference-section",
+        dest="skip_reference_section",
+        action="store_true",
+        default=True,
+        help=(
+            "Ignore PMID/DOI identifiers after a standalone References/Bibliography "
+            "heading. Enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--no-skip-reference-section",
+        dest="skip_reference_section",
+        action="store_false",
+        help="Process PMID/DOI identifiers even after a References/Bibliography heading.",
+    )
+    parser.add_argument(
+        "--backup",
+        dest="create_backup",
+        action="store_true",
+        help=(
+            "Also create a safety copy of the input .docx before writing the separate "
+            ".endnote.docx output. Disabled by default because the input file is not modified."
+        ),
+    )
+    parser.add_argument(
         "--doi-source",
         default="auto",
         choices=["auto", "pubmed-first", "crossref", "datacite", "content-negotiation"],
@@ -155,6 +180,8 @@ def run(args: argparse.Namespace) -> int:
             scan_parenthetical_pmids=args.scan_parenthetical_pmids,
             scan_dois=args.scan_dois,
             scan_bare_dois=args.scan_bare_dois,
+            skip_reference_section=args.skip_reference_section,
+            create_backup=args.create_backup,
             doi_source=args.doi_source,
             import_format=args.import_format,
         )
