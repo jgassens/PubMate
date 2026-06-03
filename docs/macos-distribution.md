@@ -80,13 +80,13 @@ If your checkout lives in an iCloud/File Provider-backed folder and the convenie
 Create a `notarytool` keychain profile once:
 
 ```bash
-xcrun notarytool store-credentials pubmate-notary
+xcrun notarytool store-credentials PubMate-notary
 ```
 
 Then submit and staple:
 
 ```bash
-MACOS_NOTARY_PROFILE=pubmate-notary \
+MACOS_NOTARY_PROFILE=PubMate-notary \
   macos/notarize_distribution.sh dist/PubMate-<version>-macos-universal2.dmg
 ```
 

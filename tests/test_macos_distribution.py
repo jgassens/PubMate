@@ -3,9 +3,9 @@ import py_compile
 import shutil
 import subprocess
 import tomllib
+from types import SimpleNamespace
 
 import pmid2endnote
-from pmid2endnote.app import ProcessingResult
 from pmid2endnote import macos_launcher
 
 
@@ -60,6 +60,12 @@ def test_notarization_help_exits_successfully() -> None:
 
     assert completed.returncode == 0
     assert "Submit a PubMate DMG" in completed.stdout
+
+
+def test_notarization_helper_can_fall_back_to_full_xcode() -> None:
+    text = Path("macos/notarize_distribution.sh").read_text(encoding="utf-8")
+    assert "xcrun --find notarytool" in text
+    assert "/Applications/Xcode.app/Contents/Developer" in text
 
 
 def test_build_script_checks_developer_id_identity() -> None:
@@ -146,6 +152,19 @@ def test_sparkle_skips_pyobjc_startup_on_intel_runtime(monkeypatch) -> None:
     )
 
 
+def _patch_lightweight_processing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        macos_launcher,
+        "_processing_options",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        macos_launcher,
+        "_endnote_instructions",
+        lambda: "Import {enw_file} into {output_docx}; PubMed data: {nbib_file}.",
+    )
+
+
 def test_macos_launcher_uses_dropped_docx_path(monkeypatch, tmp_path: Path) -> None:
     input_docx = tmp_path / "dropped.docx"
     input_docx.write_bytes(b"fake docx bytes")
@@ -155,6 +174,7 @@ def test_macos_launcher_uses_dropped_docx_path(monkeypatch, tmp_path: Path) -> N
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
     monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    _patch_lightweight_processing(monkeypatch)
     monkeypatch.setattr(
         macos_launcher,
         "_choose_docx",
@@ -177,7 +197,7 @@ def test_macos_launcher_uses_dropped_docx_path(monkeypatch, tmp_path: Path) -> N
         captured["options"] = options
         if status_callback:
             status_callback("Working")
-        return ProcessingResult(
+        return SimpleNamespace(
             exit_code=0,
             report={},
             output_docx=tmp_path / "output.docx",
@@ -195,6 +215,70 @@ def test_macos_launcher_uses_dropped_docx_path(monkeypatch, tmp_path: Path) -> N
     assert captured["options"].scan_parenthetical_pmids is False
     assert captured["options"].skip_reference_section is True
     assert alerts[0][0] == "PubMate finished."
+
+
+def test_macos_launcher_reprompts_after_blank_email(monkeypatch, tmp_path: Path) -> None:
+    input_docx = tmp_path / "dropped.docx"
+    input_docx.write_bytes(b"fake docx bytes")
+    captured = {}
+    prompts = iter(["", "retry@example.edu", ""])
+    retry_prompts = []
+    yes_no_answers = iter([False, True])
+
+    monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
+    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    _patch_lightweight_processing(monkeypatch)
+    monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: None)
+    monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: next(prompts))
+    monkeypatch.setattr(
+        macos_launcher,
+        "_prompt_missing_email_retry",
+        lambda: retry_prompts.append(True) or True,
+    )
+    monkeypatch.setattr(
+        macos_launcher,
+        "_prompt_yes_no",
+        lambda prompt, default_yes: next(yes_no_answers),
+    )
+    monkeypatch.setattr(macos_launcher, "_display_alert", lambda title, message=None: None)
+
+    def fake_process_document(options, *, status_callback=None):
+        captured["options"] = options
+        return SimpleNamespace(
+            exit_code=0,
+            report={},
+            output_docx=tmp_path / "output.docx",
+            nbib_file=tmp_path / "output.nbib",
+            enw_file=tmp_path / "output.enw",
+            report_file=tmp_path / "report.json",
+            messages=("done",),
+        )
+
+    monkeypatch.setattr(macos_launcher, "process_document", fake_process_document)
+
+    assert macos_launcher.main([str(input_docx)]) == 0
+    assert captured["options"].email == "retry@example.edu"
+    assert retry_prompts == [True]
+
+
+def test_macos_launcher_closes_from_missing_email_prompt(monkeypatch, tmp_path: Path) -> None:
+    input_docx = tmp_path / "dropped.docx"
+    input_docx.write_bytes(b"fake docx bytes")
+
+    monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
+    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: None)
+    monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: "")
+    monkeypatch.setattr(macos_launcher, "_prompt_missing_email_retry", lambda: False)
+    monkeypatch.setattr(
+        macos_launcher,
+        "process_document",
+        lambda options, *, status_callback=None: (_ for _ in ()).throw(
+            AssertionError("processing should not start without email")
+        ),
+    )
+
+    assert macos_launcher.main([str(input_docx)]) == 0
 
 
 def test_macos_launcher_rejects_non_docx_launch_arg(monkeypatch, tmp_path: Path) -> None:
@@ -232,6 +316,7 @@ def test_macos_launcher_reports_unexpected_processing_error(monkeypatch, tmp_pat
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
     monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    _patch_lightweight_processing(monkeypatch)
     monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: "test@example.edu")
     monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: "")
     monkeypatch.setattr(

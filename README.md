@@ -267,7 +267,7 @@ The default build is ad-hoc signed for local testing. For public distribution, b
 
 ```bash
 MACOS_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" macos/build_distribution.sh
-MACOS_NOTARY_PROFILE=pubmate-notary macos/notarize_distribution.sh dist/PubMate-<version>-macos-universal2.dmg
+MACOS_NOTARY_PROFILE=PubMate-notary macos/notarize_distribution.sh dist/PubMate-<version>-macos-universal2.dmg
 ```
 
 The DMG is the primary distribution artifact. The notarization helper also supports App Store Connect API key credentials through `MACOS_NOTARY_KEY`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER`; those credentials submit to Apple, but the app still needs a Developer ID Application certificate for public notarized distribution.

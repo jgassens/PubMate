@@ -33,18 +33,41 @@ if [[ -n "$SAVED_EMAIL" ]]; then
   EMAIL="$SAVED_EMAIL"
   echo "Using saved PubMed email: $EMAIL"
 else
-  EMAIL="$(osascript <<'APPLESCRIPT'
+  EMAIL=""
+  while [[ -z "${EMAIL//[[:space:]]/}" ]]; do
+    EMAIL="$(osascript <<'APPLESCRIPT'
 try
   set dialogResult to display dialog "Enter the email address required by NCBI E-utilities. PMID2EndNote will remember this for future runs." default answer "" buttons {"Cancel", "Continue"} default button "Continue"
   return text returned of dialogResult
 on error number -128
-  return ""
+  return "__CANCELLED__"
 end try
 APPLESCRIPT
-  )"
+    )"
+
+    if [[ "$EMAIL" == "__CANCELLED__" ]]; then
+      exit 0
+    fi
+
+    if [[ -z "${EMAIL//[[:space:]]/}" ]]; then
+      EMAIL_CHOICE="$(osascript <<'APPLESCRIPT'
+try
+  set dialogResult to display alert "PMID2EndNote needs an NCBI email address to fetch PubMed records." message "Enter an email address to continue, or close PMID2EndNote." buttons {"Close PMID2EndNote", "Enter Email"} default button "Enter Email" cancel button "Close PMID2EndNote"
+  return button returned of dialogResult
+on error number -128
+  return "Close PMID2EndNote"
+end try
+APPLESCRIPT
+      )"
+
+      if [[ "$EMAIL_CHOICE" != "Enter Email" ]]; then
+        exit 0
+      fi
+    fi
+  done
 fi
 
-if [[ -z "$EMAIL" ]]; then
+if [[ -z "${EMAIL//[[:space:]]/}" ]]; then
   osascript -e 'display alert "PMID2EndNote needs an NCBI email address to fetch PubMed records."'
   exit 1
 fi

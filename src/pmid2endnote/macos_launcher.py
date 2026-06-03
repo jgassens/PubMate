@@ -12,13 +12,17 @@ import subprocess
 import sys
 import traceback
 
-from pmid2endnote.app import ENDNOTE_INSTRUCTIONS, ProcessingOptions, process_document
 from pmid2endnote import sparkle
 from pmid2endnote.settings import get_saved_email
 
 
 APP_NAME = "PubMate"
 SELF_TEST_MESSAGE = "PubMate macOS launcher self-test OK"
+EMAIL_PROMPT = (
+    "Enter the email address required by NCBI E-utilities. "
+    "PubMate will remember this for future runs."
+)
+MISSING_EMAIL_MESSAGE = "PubMate needs an NCBI email address to fetch PubMed records."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,14 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         email = saved_email
         print(f"Using saved PubMed email: {email}")
     else:
-        email = _prompt_text(
-            "Enter the email address required by NCBI E-utilities. "
-            "PubMate will remember this for future runs.",
-        )
+        email = _prompt_required_email()
 
-    if not email:
-        _display_alert("PubMate needs an NCBI email address to fetch PubMed records.")
-        return 1
+    if email is None:
+        return 0
 
     api_key = _prompt_text("Optional: enter an NCBI API key, or leave this blank.", optional=True)
     scan_parenthetical_pmids = _prompt_yes_no(
@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = process_document(
-            ProcessingOptions(
+            _processing_options(
                 input_docx=input_docx,
                 email=email,
                 api_key=api_key or None,
@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         print(message)
 
     if result.exit_code == 0:
-        instruction = ENDNOTE_INSTRUCTIONS.format(
+        instruction = _endnote_instructions().format(
             enw_file=result.enw_file,
             output_docx=result.output_docx,
             nbib_file=result.nbib_file,
@@ -120,6 +120,24 @@ def main(argv: list[str] | None = None) -> int:
         _display_alert("PubMate finished with an error.", detail)
 
     return result.exit_code
+
+
+def _processing_options(**kwargs: object) -> object:
+    from pmid2endnote.app import ProcessingOptions
+
+    return ProcessingOptions(**kwargs)
+
+
+def process_document(options: object, *, status_callback: object | None = None) -> object:
+    from pmid2endnote.app import process_document as run_process_document
+
+    return run_process_document(options, status_callback=status_callback)
+
+
+def _endnote_instructions() -> str:
+    from pmid2endnote.app import ENDNOTE_INSTRUCTIONS
+
+    return ENDNOTE_INSTRUCTIONS
 
 
 def _choose_docx() -> Path | None:
@@ -158,7 +176,21 @@ def _docx_from_launch_args(args: list[str]) -> tuple[Path | None, str | None]:
     return input_docx, None
 
 
-def _prompt_text(prompt: str, *, optional: bool = False) -> str:
+def _prompt_required_email() -> str | None:
+    while True:
+        email = _prompt_text(EMAIL_PROMPT)
+        if email is None:
+            return None
+
+        email = email.strip()
+        if email:
+            return email
+
+        if not _prompt_missing_email_retry():
+            return None
+
+
+def _prompt_text(prompt: str, *, optional: bool = False) -> str | None:
     buttons = '{"Skip", "Continue"}' if optional else '{"Cancel", "Continue"}'
     cancel_result = "" if optional else "__CANCELLED__"
     script = f"""
@@ -170,7 +202,19 @@ on error number -128
 end try
 """
     value = _run_applescript(script).strip()
-    return "" if value == "__CANCELLED__" else value
+    return None if value == "__CANCELLED__" else value
+
+
+def _prompt_missing_email_retry() -> bool:
+    script = f"""
+try
+  set dialogResult to display alert {_applescript_string(MISSING_EMAIL_MESSAGE)} message "Enter an email address to continue, or close PubMate." buttons {{"Close PubMate", "Enter Email"}} default button "Enter Email" cancel button "Close PubMate"
+  return button returned of dialogResult
+on error number -128
+  return "Close PubMate"
+end try
+"""
+    return _run_applescript(script).strip() == "Enter Email"
 
 
 def _prompt_yes_no(prompt: str, *, default_yes: bool) -> bool:

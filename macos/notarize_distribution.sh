@@ -7,6 +7,12 @@ ISSUER_ID="${MACOS_NOTARY_ISSUER:-${APP_STORE_CONNECT_ISSUER_ID:-}}"
 PROFILE="${MACOS_NOTARY_PROFILE:-}"
 SHOW_HELP=0
 
+if ! xcrun --find notarytool >/dev/null 2>&1 && [[ -z "${DEVELOPER_DIR:-}" ]]; then
+  if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
+    export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+  fi
+fi
+
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
