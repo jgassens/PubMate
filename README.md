@@ -278,6 +278,9 @@ The packaged app includes Sparkle auto-update support. PubMate checks the GitHub
 https://jgassens.github.io/PubMate/appcast.xml
 ```
 
+On Intel runtimes, PubMate skips Sparkle startup to avoid a PyObjC launch hang;
+the app still opens and processes documents normally.
+
 When you publish a new version, build and notarize the DMG, upload that DMG to the matching GitHub release, and regenerate the appcast:
 
 ```bash

@@ -174,7 +174,20 @@ EOF
 fi
 
 if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
-  if ! "$PYTHON" -c 'import objc, Foundation, AppKit' >/dev/null 2>&1; then
+  if ! "$PYTHON" - <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+
+missing = [
+    module
+    for module in ("objc", "Foundation", "AppKit")
+    if importlib.util.find_spec(module) is None
+]
+if missing:
+    print(", ".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
     cat >&2 <<EOF
 PyObjC is not installed in $PYTHON.
 

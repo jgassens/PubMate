@@ -81,6 +81,8 @@ def test_build_script_embeds_sparkle_metadata() -> None:
     assert "SUPublicEDKey" in text
     assert "SUEnableAutomaticChecks" in text
     assert "--sparkle-self-test" in text
+    assert "importlib.util.find_spec" in text
+    assert "import objc, Foundation, AppKit" not in text
     assert 'TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"' in text
     assert "--target-arch" in text
     assert "Universal2 builds require a universal Python runtime" in text
@@ -122,6 +124,26 @@ def test_macos_launcher_sparkle_self_test_does_not_open_dialogs(monkeypatch, cap
 
     assert macos_launcher.main(["--sparkle-self-test"]) == 0
     assert "Sparkle runtime self-test OK" in capsys.readouterr().out
+
+
+def test_sparkle_skips_pyobjc_startup_on_intel_runtime(monkeypatch) -> None:
+    def fail_if_loaded() -> None:
+        raise AssertionError("Intel startup should not import PyObjC")
+
+    monkeypatch.delenv("PUBMATE_DISABLE_SPARKLE", raising=False)
+    monkeypatch.delenv("PUBMATE_ENABLE_INTEL_SPARKLE", raising=False)
+    monkeypatch.setattr(macos_launcher.sparkle.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_launcher.sparkle.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(macos_launcher.sparkle, "_load_sparkle_framework", fail_if_loaded)
+
+    assert (
+        macos_launcher.sparkle.initialize_sparkle_updater()
+        == macos_launcher.sparkle.INTEL_SPARKLE_DISABLED_MESSAGE
+    )
+    assert (
+        macos_launcher.sparkle.validate_sparkle_runtime()
+        == macos_launcher.sparkle.INTEL_SPARKLE_DISABLED_MESSAGE
+    )
 
 
 def test_macos_launcher_uses_dropped_docx_path(monkeypatch, tmp_path: Path) -> None:

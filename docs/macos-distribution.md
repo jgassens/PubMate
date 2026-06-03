@@ -123,6 +123,12 @@ SUPublicEDKey=<Sparkle EdDSA public key>
 
 The build script embeds `Sparkle.framework`, sets the appcast keys in `Info.plist`, signs Sparkle's nested updater components, and runs a packaged `--sparkle-self-test` before creating the DMG.
 
+On Intel runtimes, PubMate skips Sparkle startup because importing the PyObjC
+bridge can hang before the launcher shows its file picker. The app still opens
+and processes documents normally; Apple Silicon builds continue to initialize
+Sparkle. Set `PUBMATE_ENABLE_INTEL_SPARKLE=1` only when deliberately testing the
+Intel Sparkle bridge.
+
 If Sparkle is not already available locally, resolve it once:
 
 ```bash

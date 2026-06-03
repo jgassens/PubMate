@@ -10,11 +10,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import os
+import platform
 import sys
 
 
 DEFAULT_FEED_URL = "https://jgassens.github.io/PubMate/appcast.xml"
 DEFAULT_PUBLIC_ED_KEY = "HK2FMFt1/JlsEm52nLZ7X4cXo1nmLLJpAoRzB3y7tYQ="
+ENABLE_INTEL_SPARKLE_ENV = "PUBMATE_ENABLE_INTEL_SPARKLE"
+INTEL_SPARKLE_DISABLED_MESSAGE = (
+    "Sparkle auto-update is disabled on Intel Macs to avoid a PyObjC startup "
+    "hang; PubMate will still run normally."
+)
 
 _framework_loaded = False
 _updater_controller: Any | None = None
@@ -25,6 +31,10 @@ def initialize_sparkle_updater() -> str | None:
 
     if os.environ.get("PUBMATE_DISABLE_SPARKLE") == "1":
         return None
+
+    skip_reason = _startup_skip_reason()
+    if skip_reason is not None:
+        return skip_reason
 
     try:
         _load_sparkle_framework()
@@ -51,6 +61,13 @@ def initialize_sparkle_updater() -> str | None:
 def validate_sparkle_runtime() -> str:
     """Validate that the packaged app can load Sparkle.framework."""
 
+    if os.environ.get("PUBMATE_DISABLE_SPARKLE") == "1":
+        return "Sparkle runtime self-test skipped because PUBMATE_DISABLE_SPARKLE=1."
+
+    skip_reason = _startup_skip_reason()
+    if skip_reason is not None:
+        return skip_reason
+
     _load_sparkle_framework()
 
     import objc  # type: ignore[import-not-found]
@@ -67,6 +84,16 @@ def validate_sparkle_runtime() -> str:
     if controller is None:
         raise RuntimeError("SPUStandardUpdaterController could not be created")
     return "Sparkle runtime self-test OK"
+
+
+def _startup_skip_reason() -> str | None:
+    if _is_intel_runtime() and os.environ.get(ENABLE_INTEL_SPARKLE_ENV) != "1":
+        return INTEL_SPARKLE_DISABLED_MESSAGE
+    return None
+
+
+def _is_intel_runtime() -> bool:
+    return sys.platform == "darwin" and platform.machine() == "x86_64"
 
 
 def _load_sparkle_framework() -> None:
