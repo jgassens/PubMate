@@ -267,14 +267,64 @@ sign_nested_bundles() {
     done
 }
 
+require_macho_archs() {
+  local root="$1"
+  local required_archs=()
+  case "$TARGET_ARCH" in
+    universal2)
+      required_archs=(arm64 x86_64)
+      ;;
+    arm64|x86_64)
+      required_archs=("$TARGET_ARCH")
+      ;;
+  esac
+
+  local inspected=0
+  local failures=0
+  local binary file_type archs required_arch display_path
+  while IFS= read -r -d '' binary; do
+    file_type="$(file -b "$binary" 2>/dev/null || true)"
+    [[ "$file_type" == *"Mach-O"* ]] || continue
+
+    inspected=$((inspected + 1))
+    archs="$(lipo -archs "$binary" 2>/dev/null || true)"
+    display_path="${binary#$APP_STAGE_PATH/}"
+    if [[ -z "$archs" ]]; then
+      echo "Could not inspect architectures for bundled Mach-O file: $display_path" >&2
+      failures=1
+      continue
+    fi
+
+    for required_arch in "${required_archs[@]}"; do
+      if [[ " $archs " != *" $required_arch "* ]]; then
+        echo "Missing $required_arch slice in $display_path; found: $archs" >&2
+        failures=1
+      fi
+    done
+  done < <(find "$root" -type f -print0)
+
+  if [[ "$inspected" -eq 0 ]]; then
+    echo "No Mach-O files were found in the app bundle: $root" >&2
+    exit 1
+  fi
+  if [[ "$failures" -ne 0 ]]; then
+    echo "Architecture validation failed for $APP_NAME.app ($TARGET_ARCH)." >&2
+    echo "Every bundled Mach-O file must include: ${(j: :)required_archs}" >&2
+    echo "Use a universal Python runtime and universal native dependencies before publishing this DMG." >&2
+    exit 1
+  fi
+}
+
 "$PYTHON" -m PyInstaller \
   --noconfirm \
   --clean \
   --target-arch "$TARGET_ARCH" \
   --windowed \
+  --argv-emulation \
   --name "$APP_NAME" \
   --icon "$ICON_PATH" \
   --osx-bundle-identifier "$BUNDLE_ID" \
+  --collect-data docx \
   --paths "$PROJECT_DIR/src" \
   --distpath "$STAGE_DIST_DIR" \
   --workpath "$BUILD_DIR/pyinstaller" \
@@ -288,12 +338,24 @@ fi
 
 clean_macos_metadata "$APP_STAGE_PATH"
 
+DOCX_TEMPLATES_SOURCE="$STAGE_DIST_DIR/$APP_NAME/_internal/docx/templates"
+if [[ -d "$DOCX_TEMPLATES_SOURCE" ]]; then
+  mkdir -p "$APP_STAGE_PATH/Contents/Frameworks/docx"
+  rm -rf "$APP_STAGE_PATH/Contents/Frameworks/docx/templates"
+  ditto --norsrc --noextattr \
+    "$DOCX_TEMPLATES_SOURCE" \
+    "$APP_STAGE_PATH/Contents/Frameworks/docx/templates"
+  mkdir -p "$APP_STAGE_PATH/Contents/Frameworks/docx/parts"
+fi
+
 if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
   SPARKLE_FRAMEWORK_RESOLVED="$(find_sparkle_framework)"
   rm -rf "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
   ditto --norsrc --noextattr "$SPARKLE_FRAMEWORK_RESOLVED" "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
   clean_macos_metadata "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
 fi
+
+require_macho_archs "$APP_STAGE_PATH"
 
 plist_set_string() {
   local key="$1"
@@ -311,11 +373,26 @@ plist_set_bool() {
     /usr/libexec/PlistBuddy -c "Add :$key bool $value" "$plist"
 }
 
+plist_register_docx() {
+  local plist="$APP_STAGE_PATH/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Delete :CFBundleDocumentTypes" "$plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes array" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0 dict" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeName string Microsoft Word .docx document" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Editor" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSHandlerRank string Alternate" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions array" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 string docx" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string org.openxmlformats.wordprocessingml.document" "$plist"
+}
+
 plist_set_string "CFBundleShortVersionString" "$VERSION"
 plist_set_string "CFBundleVersion" "$VERSION"
 plist_set_string "LSMinimumSystemVersion" "13.0"
-plist_set_string "NSDocumentsFolderUsageDescription" "PubMate reads the Word document you choose and writes converted output files next to it."
-plist_set_string "NSDownloadsFolderUsageDescription" "PubMate can read and write Word, EndNote import, and report files in Downloads when you choose a file there."
+plist_set_string "NSDocumentsFolderUsageDescription" "PubMate reads the Word document you choose or drop and writes converted output files next to it."
+plist_set_string "NSDownloadsFolderUsageDescription" "PubMate can read and write Word, EndNote import, and report files in Downloads when you choose or drop a file there."
+plist_register_docx
 
 if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
   plist_set_string "SUFeedURL" "$SPARKLE_FEED_URL"

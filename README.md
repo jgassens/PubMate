@@ -261,7 +261,7 @@ dist/PubMate.app
 dist/PubMate-<version>-macos-universal2.dmg
 ```
 
-The app uses native macOS dialogs and the same processing engine as the CLI. The default release build is universal2, so the same DMG runs on Apple Silicon and Intel Macs. For universal builds, use a universal Python runtime such as the python.org framework build; an arm64-only Homebrew Python can only create an Apple Silicon-only app.
+The app uses native macOS dialogs and the same processing engine as the CLI. The default release build is universal2, so the same DMG runs on Apple Silicon and Intel Macs. For universal builds, use a universal Python runtime such as the python.org framework build; an arm64-only Homebrew Python can only create an Apple Silicon-only app. The build script verifies the finished `.app` and fails if any bundled native binary is missing either architecture slice.
 
 The default build is ad-hoc signed for local testing. For public distribution, build with a Developer ID certificate and notarize the DMG:
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import traceback
 
 from pmid2endnote.app import ENDNOTE_INSTRUCTIONS, ProcessingOptions, process_document
 from pmid2endnote import sparkle
@@ -46,7 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     if sparkle_warning:
         print(sparkle_warning, file=sys.stderr)
 
-    input_docx = _choose_docx()
+    input_docx, launch_error = _docx_from_launch_args(args)
+    if launch_error:
+        _display_alert("PubMate could not open that file.", launch_error)
+        return 1
+    if input_docx is None:
+        input_docx = _choose_docx()
     if input_docx is None:
         return 0
 
@@ -77,16 +83,21 @@ def main(argv: list[str] | None = None) -> int:
     print("Running PubMate...")
     print(f"Input: {input_docx}")
 
-    result = process_document(
-        ProcessingOptions(
-            input_docx=input_docx,
-            email=email,
-            api_key=api_key or None,
-            scan_parenthetical_pmids=scan_parenthetical_pmids,
-            skip_reference_section=skip_reference_section,
-        ),
-        status_callback=lambda message: print(message, flush=True),
-    )
+    try:
+        result = process_document(
+            ProcessingOptions(
+                input_docx=input_docx,
+                email=email,
+                api_key=api_key or None,
+                scan_parenthetical_pmids=scan_parenthetical_pmids,
+                skip_reference_section=skip_reference_section,
+            ),
+            status_callback=lambda message: print(message, flush=True),
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        _display_alert("PubMate crashed.", f"{type(exc).__name__}: {exc}")
+        return 2
 
     for message in result.messages:
         print(message)
@@ -122,6 +133,29 @@ end try
 """
     value = _run_applescript(script).strip()
     return Path(value) if value else None
+
+
+def _docx_from_launch_args(args: list[str]) -> tuple[Path | None, str | None]:
+    """Return a document path supplied by Finder/open, or a user-facing error."""
+
+    candidates = [
+        arg
+        for arg in args
+        if arg and not arg.startswith("--") and not arg.startswith("-psn_")
+    ]
+    if not candidates:
+        return None, None
+    if len(candidates) > 1:
+        return None, "Drop one Word .docx file on PubMate at a time."
+
+    input_docx = Path(candidates[0]).expanduser()
+    if input_docx.suffix.lower() != ".docx":
+        return None, f"PubMate only accepts Word .docx files:\n{input_docx}"
+    if not input_docx.exists():
+        return None, f"The dropped file could not be found:\n{input_docx}"
+    if not input_docx.is_file():
+        return None, f"The dropped item is not a file:\n{input_docx}"
+    return input_docx, None
 
 
 def _prompt_text(prompt: str, *, optional: bool = False) -> str:

@@ -26,7 +26,7 @@ dist/PubMate.app
 dist/PubMate-<version>-macos-universal2.dmg
 ```
 
-The default build target is `universal2`, so the same DMG works on Apple Silicon and Intel Macs. Universal builds require a universal Python runtime. On this Mac, use the python.org framework Python instead of the arm64-only Homebrew Python:
+The default build target is `universal2`, so the same DMG works on Apple Silicon and Intel Macs. Universal builds require a universal Python runtime. The build script also scans the finished `.app` and fails if any bundled Mach-O file is missing either the `arm64` or `x86_64` slice. On this Mac, use the python.org framework Python instead of the arm64-only Homebrew Python:
 
 ```bash
 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 -m venv .venv-universal

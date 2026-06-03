@@ -2,7 +2,10 @@ from pathlib import Path
 import py_compile
 import shutil
 import subprocess
+import tomllib
 
+import pmid2endnote
+from pmid2endnote.app import ProcessingResult
 from pmid2endnote import macos_launcher
 
 
@@ -42,6 +45,11 @@ def test_pyproject_has_macos_packaging_extra() -> None:
     assert "pyobjc-framework-Cocoa" in text
 
 
+def test_package_version_matches_pyproject() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    assert pmid2endnote.__version__ == project["project"]["version"]
+
+
 def test_notarization_help_exits_successfully() -> None:
     completed = subprocess.run(
         ["macos/notarize_distribution.sh", "--help"],
@@ -63,6 +71,12 @@ def test_build_script_checks_developer_id_identity() -> None:
 def test_build_script_embeds_sparkle_metadata() -> None:
     text = Path("macos/build_distribution.sh").read_text(encoding="utf-8")
     assert "Sparkle.framework" in text
+    assert "--argv-emulation" in text
+    assert "--collect-data docx" in text
+    assert "Contents/Frameworks/docx/templates" in text
+    assert "Contents/Frameworks/docx/parts" in text
+    assert "CFBundleDocumentTypes" in text
+    assert "org.openxmlformats.wordprocessingml.document" in text
     assert "SUFeedURL" in text
     assert "SUPublicEDKey" in text
     assert "SUEnableAutomaticChecks" in text
@@ -70,6 +84,13 @@ def test_build_script_embeds_sparkle_metadata() -> None:
     assert 'TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"' in text
     assert "--target-arch" in text
     assert "Universal2 builds require a universal Python runtime" in text
+    assert "require_macho_archs" in text
+    assert 'lipo -archs "$binary"' in text
+    assert "Every bundled Mach-O file must include" in text
+    assert "Use a universal Python runtime and universal native dependencies" in text
+    assert text.index('require_macho_archs "$APP_STAGE_PATH"') < text.index(
+        '"$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test'
+    )
     assert text.index("--sparkle-self-test") < text.index("codesign --verify --deep --strict")
 
 
@@ -101,3 +122,111 @@ def test_macos_launcher_sparkle_self_test_does_not_open_dialogs(monkeypatch, cap
 
     assert macos_launcher.main(["--sparkle-self-test"]) == 0
     assert "Sparkle runtime self-test OK" in capsys.readouterr().out
+
+
+def test_macos_launcher_uses_dropped_docx_path(monkeypatch, tmp_path: Path) -> None:
+    input_docx = tmp_path / "dropped.docx"
+    input_docx.write_bytes(b"fake docx bytes")
+    captured = {}
+    alerts = []
+    yes_no_answers = iter([False, True])
+
+    monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
+    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    monkeypatch.setattr(
+        macos_launcher,
+        "_choose_docx",
+        lambda: (_ for _ in ()).throw(AssertionError("file picker should not open")),
+    )
+    monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: "test@example.edu")
+    monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: "")
+    monkeypatch.setattr(
+        macos_launcher,
+        "_prompt_yes_no",
+        lambda prompt, default_yes: next(yes_no_answers),
+    )
+    monkeypatch.setattr(
+        macos_launcher,
+        "_display_alert",
+        lambda title, message=None: alerts.append((title, message)),
+    )
+
+    def fake_process_document(options, *, status_callback=None):
+        captured["options"] = options
+        if status_callback:
+            status_callback("Working")
+        return ProcessingResult(
+            exit_code=0,
+            report={},
+            output_docx=tmp_path / "output.docx",
+            nbib_file=tmp_path / "output.nbib",
+            enw_file=tmp_path / "output.enw",
+            report_file=tmp_path / "report.json",
+            messages=("done",),
+        )
+
+    monkeypatch.setattr(macos_launcher, "process_document", fake_process_document)
+
+    assert macos_launcher.main([str(input_docx)]) == 0
+    assert captured["options"].input_docx == input_docx
+    assert captured["options"].email == "test@example.edu"
+    assert captured["options"].scan_parenthetical_pmids is False
+    assert captured["options"].skip_reference_section is True
+    assert alerts[0][0] == "PubMate finished."
+
+
+def test_macos_launcher_rejects_non_docx_launch_arg(monkeypatch, tmp_path: Path) -> None:
+    bad_input = tmp_path / "notes.txt"
+    bad_input.write_text("not a Word document", encoding="utf-8")
+    alerts = []
+
+    monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
+    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    monkeypatch.setattr(
+        macos_launcher,
+        "_choose_docx",
+        lambda: (_ for _ in ()).throw(AssertionError("file picker should not open")),
+    )
+    monkeypatch.setattr(
+        macos_launcher,
+        "_display_alert",
+        lambda title, message=None: alerts.append((title, message)),
+    )
+
+    assert macos_launcher.main([str(bad_input)]) == 1
+    assert alerts == [
+        (
+            "PubMate could not open that file.",
+            f"PubMate only accepts Word .docx files:\n{bad_input}",
+        )
+    ]
+
+
+def test_macos_launcher_reports_unexpected_processing_error(monkeypatch, tmp_path: Path) -> None:
+    input_docx = tmp_path / "dropped.docx"
+    input_docx.write_bytes(b"fake docx bytes")
+    alerts = []
+    yes_no_answers = iter([False, True])
+
+    monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
+    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: "test@example.edu")
+    monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: "")
+    monkeypatch.setattr(
+        macos_launcher,
+        "_prompt_yes_no",
+        lambda prompt, default_yes: next(yes_no_answers),
+    )
+    monkeypatch.setattr(
+        macos_launcher,
+        "_display_alert",
+        lambda title, message=None: alerts.append((title, message)),
+    )
+    monkeypatch.setattr(
+        macos_launcher,
+        "process_document",
+        lambda options, *, status_callback=None: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    assert macos_launcher.main([str(input_docx)]) == 2
+    assert alerts == [("PubMate crashed.", "RuntimeError: boom")]
