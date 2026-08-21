@@ -173,35 +173,6 @@ EOF
   exit 1
 fi
 
-if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
-  if ! "$PYTHON" - <<'PY' >/dev/null 2>&1
-import importlib.util
-import sys
-
-missing = [
-    module
-    for module in ("objc", "Foundation", "AppKit")
-    if importlib.util.find_spec(module) is None
-]
-if missing:
-    print(", ".join(missing), file=sys.stderr)
-    raise SystemExit(1)
-PY
-  then
-    cat >&2 <<EOF
-PyObjC is not installed in $PYTHON.
-
-Sparkle support uses PyObjC to start Sparkle.framework from the packaged app.
-Install the macOS packaging extra first:
-  "$PYTHON" -m pip install -e ".[macos]"
-
-Or build without Sparkle for local testing:
-  macos/build_distribution.sh --no-sparkle
-EOF
-    exit 1
-  fi
-fi
-
 if [[ "$SIGN_APP" -eq 1 && "$SIGN_IDENTITY" != "-" ]]; then
   if ! security find-identity -p codesigning -v | grep -F "$SIGN_IDENTITY" >/dev/null; then
     cat >&2 <<EOF
@@ -260,6 +231,49 @@ find_sparkle_framework() {
   echo "run: swift build --package-path macos/SparkleSupport -c release" >&2
   echo "or set SPARKLE_FRAMEWORK_PATH=/path/to/Sparkle.framework" >&2
   return 1
+}
+
+build_sparkle_helper() {
+  local frameworks_dir="$1"
+  local helper_source="$PROJECT_DIR/macos/PubMateUpdater.m"
+  local helper_output="$APP_STAGE_PATH/Contents/MacOS/PubMateUpdater"
+  local helper_build_dir="$BUILD_DIR/sparkle-helper"
+  local helper_archs=()
+  local helper_arch helper_slice
+  local helper_slices=()
+
+  case "$TARGET_ARCH" in
+    universal2)
+      helper_archs=(arm64 x86_64)
+      ;;
+    arm64|x86_64)
+      helper_archs=("$TARGET_ARCH")
+      ;;
+  esac
+
+  mkdir -p "$helper_build_dir"
+  for helper_arch in "${helper_archs[@]}"; do
+    helper_slice="$helper_build_dir/PubMateUpdater-$helper_arch"
+    xcrun clang \
+      -arch "$helper_arch" \
+      -fobjc-arc \
+      -fblocks \
+      -mmacosx-version-min=13.0 \
+      -F "$frameworks_dir" \
+      -framework Cocoa \
+      -framework Sparkle \
+      -Wl,-rpath,@executable_path/../Frameworks \
+      "$helper_source" \
+      -o "$helper_slice"
+    helper_slices+=("$helper_slice")
+  done
+
+  if [[ "${#helper_slices[@]}" -eq 1 ]]; then
+    cp "${helper_slices[1]}" "$helper_output"
+  else
+    lipo -create "${helper_slices[@]}" -output "$helper_output"
+  fi
+  chmod 755 "$helper_output"
 }
 
 sign_target() {
@@ -366,6 +380,7 @@ if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
   rm -rf "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
   ditto --norsrc --noextattr "$SPARKLE_FRAMEWORK_RESOLVED" "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
   clean_macos_metadata "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
+  build_sparkle_helper "$APP_STAGE_PATH/Contents/Frameworks"
 fi
 
 require_macho_archs "$APP_STAGE_PATH"
@@ -411,7 +426,9 @@ if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
   plist_set_string "SUFeedURL" "$SPARKLE_FEED_URL"
   plist_set_string "SUPublicEDKey" "$SPARKLE_PUBLIC_ED_KEY"
   plist_set_bool "SUEnableAutomaticChecks" "true"
-  plist_set_bool "SUAutomaticallyUpdate" "false"
+  plist_set_bool "SUAllowsAutomaticUpdates" "true"
+  plist_set_bool "SUAutomaticallyUpdate" "true"
+  plist_set_bool "SUPromptUserOnFirstLaunch" "false"
 fi
 
 "$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test >/dev/null
@@ -423,6 +440,7 @@ if [[ "$SIGN_APP" -eq 1 ]]; then
   clean_macos_metadata "$APP_STAGE_PATH"
   if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
     sign_nested_bundles "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
+    sign_target "$APP_STAGE_PATH/Contents/MacOS/PubMateUpdater"
   fi
   sign_target "$APP_STAGE_PATH"
   codesign --verify --deep --strict --verbose=2 "$APP_STAGE_PATH"

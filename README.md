@@ -272,14 +272,17 @@ MACOS_NOTARY_PROFILE=PubMate-notary macos/notarize_distribution.sh dist/PubMate-
 
 The DMG is the primary distribution artifact. The notarization helper also supports App Store Connect API key credentials through `MACOS_NOTARY_KEY`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER`; those credentials submit to Apple, but the app still needs a Developer ID Application certificate for public notarized distribution.
 
-The packaged app includes Sparkle auto-update support. PubMate checks the GitHub-hosted appcast at:
+The packaged app includes mandatory Sparkle auto-updates. On every launch,
+PubMate checks the GitHub-hosted appcast, downloads eligible updates in the
+background, and lets Sparkle install them silently when the app exits. PubMate
+does not ask the user to enable or approve this update policy, and it clears
+any saved choice to skip an older update. A signed native updater helper
+performs this work on both Apple Silicon and Intel Macs, without loading
+Sparkle through the packaged Python runtime. The appcast is:
 
 ```text
 https://jgassens.github.io/PubMate/appcast.xml
 ```
-
-On Intel runtimes, PubMate skips Sparkle startup to avoid a PyObjC launch hang;
-the app still opens and processes documents normally.
 
 When you publish a new version, build and notarize the DMG, upload that DMG to the matching GitHub release, and regenerate the appcast:
 

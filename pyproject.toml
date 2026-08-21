@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pmid2endnote"
-version = "0.1.5"
+version = "0.1.6"
 description = "Convert labeled PubMed PMID mentions in Word documents into EndNote temporary citations."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,8 +21,7 @@ test = [
   "pytest>=8.0.0"
 ]
 macos = [
-  "pyinstaller>=6.0",
-  "pyobjc-framework-Cocoa>=11.0"
+  "pyinstaller>=6.0"
 ]
 
 [project.scripts]

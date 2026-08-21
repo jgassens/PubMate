@@ -15,6 +15,7 @@ def test_macos_distribution_scripts_are_present_and_parse() -> None:
     assert Path("macos/prepare_sparkle_appcast.sh").exists()
     assert Path("macos/pubmate_launcher_entry.py").exists()
     assert Path("macos/make_icon.py").exists()
+    assert Path("macos/PubMateUpdater.m").exists()
     assert Path("macos/SparkleSupport/Package.swift").exists()
     assert Path("docs/appcast.xml").exists()
     assert Path("docs/macos-distribution.md").exists()
@@ -42,7 +43,7 @@ def test_pyproject_has_macos_packaging_extra() -> None:
     text = Path("pyproject.toml").read_text(encoding="utf-8")
     assert "macos = [" in text
     assert "pyinstaller" in text
-    assert "pyobjc-framework-Cocoa" in text
+    assert "pyobjc-framework-Cocoa" not in text
 
 
 def test_package_version_matches_pyproject() -> None:
@@ -76,6 +77,7 @@ def test_build_script_checks_developer_id_identity() -> None:
 
 def test_build_script_embeds_sparkle_metadata() -> None:
     text = Path("macos/build_distribution.sh").read_text(encoding="utf-8")
+    helper_text = Path("macos/PubMateUpdater.m").read_text(encoding="utf-8")
     assert "Sparkle.framework" in text
     assert "--argv-emulation" in text
     assert "--collect-data docx" in text
@@ -86,9 +88,15 @@ def test_build_script_embeds_sparkle_metadata() -> None:
     assert "SUFeedURL" in text
     assert "SUPublicEDKey" in text
     assert "SUEnableAutomaticChecks" in text
+    assert 'plist_set_bool "SUAllowsAutomaticUpdates" "true"' in text
+    assert 'plist_set_bool "SUAutomaticallyUpdate" "true"' in text
+    assert 'plist_set_bool "SUPromptUserOnFirstLaunch" "false"' in text
     assert "--sparkle-self-test" in text
-    assert "importlib.util.find_spec" in text
-    assert "import objc, Foundation, AppKit" not in text
+    assert "macos/PubMateUpdater.m" in text
+    assert "Contents/MacOS/PubMateUpdater" in text
+    assert "xcrun clang" in text
+    assert "lipo -create" in text
+    assert "PyObjC" not in text
     assert 'TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"' in text
     assert "--target-arch" in text
     assert "Universal2 builds require a universal Python runtime" in text
@@ -96,6 +104,15 @@ def test_build_script_embeds_sparkle_metadata() -> None:
     assert 'lipo -archs "$binary"' in text
     assert "Every bundled Mach-O file must include" in text
     assert "Use a universal Python runtime and universal native dependencies" in text
+    assert "updater.automaticallyChecksForUpdates = YES" in helper_text
+    assert "updater.automaticallyDownloadsUpdates = YES" in helper_text
+    assert "updater.allowsAutomaticUpdates" in helper_text
+    assert "[updater checkForUpdatesInBackground]" in helper_text
+    assert '@"SUSkippedVersion"' in helper_text
+    assert '@"SUSkippedMajorVersion"' in helper_text
+    assert '@"SUSkippedMajorSubreleaseVersion"' in helper_text
+    assert "[NSUserDefaults standardUserDefaults]" in helper_text
+    assert "NSApplicationActivationPolicyProhibited" in helper_text
     assert text.index('require_macho_archs "$APP_STAGE_PATH"') < text.index(
         '"$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test'
     )
@@ -132,24 +149,51 @@ def test_macos_launcher_sparkle_self_test_does_not_open_dialogs(monkeypatch, cap
     assert "Sparkle runtime self-test OK" in capsys.readouterr().out
 
 
-def test_sparkle_skips_pyobjc_startup_on_intel_runtime(monkeypatch) -> None:
-    def fail_if_loaded() -> None:
-        raise AssertionError("Intel startup should not import PyObjC")
+def test_sparkle_launches_detached_native_helper(monkeypatch, tmp_path: Path) -> None:
+    helper = tmp_path / "PubMateUpdater"
+    helper.touch()
+    captured = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(pid=123)
 
     monkeypatch.delenv("PUBMATE_DISABLE_SPARKLE", raising=False)
-    monkeypatch.delenv("PUBMATE_ENABLE_INTEL_SPARKLE", raising=False)
-    monkeypatch.setattr(macos_launcher.sparkle.sys, "platform", "darwin")
-    monkeypatch.setattr(macos_launcher.sparkle.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(macos_launcher.sparkle, "_load_sparkle_framework", fail_if_loaded)
+    monkeypatch.setattr(macos_launcher.sparkle, "_find_updater_helper", lambda: helper)
+    monkeypatch.setattr(macos_launcher.sparkle.subprocess, "Popen", fake_popen)
 
-    assert (
-        macos_launcher.sparkle.initialize_sparkle_updater()
-        == macos_launcher.sparkle.INTEL_SPARKLE_DISABLED_MESSAGE
-    )
-    assert (
-        macos_launcher.sparkle.validate_sparkle_runtime()
-        == macos_launcher.sparkle.INTEL_SPARKLE_DISABLED_MESSAGE
-    )
+    assert macos_launcher.sparkle.initialize_sparkle_updater() is None
+    assert captured["args"] == [str(helper)]
+    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["stdin"] is subprocess.DEVNULL
+    assert captured["kwargs"]["stdout"] is subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] is subprocess.DEVNULL
+
+
+def test_sparkle_self_test_uses_native_helper_without_network(monkeypatch, tmp_path: Path) -> None:
+    helper = tmp_path / "PubMateUpdater"
+    helper.touch()
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            returncode=0,
+            stdout="PubMate native Sparkle forced-update self-test OK\n",
+            stderr="",
+        )
+
+    monkeypatch.delenv("PUBMATE_DISABLE_SPARKLE", raising=False)
+    monkeypatch.setattr(macos_launcher.sparkle, "_find_updater_helper", lambda: helper)
+    monkeypatch.setattr(macos_launcher.sparkle.subprocess, "run", fake_run)
+
+    result = macos_launcher.sparkle.validate_sparkle_runtime()
+
+    assert result == "PubMate native Sparkle forced-update self-test OK"
+    assert captured["args"] == [str(helper), "--self-test"]
+    assert captured["kwargs"]["timeout"] == 20
 
 
 def _patch_lightweight_processing(monkeypatch) -> None:

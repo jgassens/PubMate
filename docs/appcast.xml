@@ -3,12 +3,12 @@
     <channel>
         <title>PubMate</title>
         <item>
-            <title>0.1.5</title>
-            <pubDate>Fri, 21 Aug 2026 16:12:19 -0500</pubDate>
-            <sparkle:version>0.1.5</sparkle:version>
-            <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+            <title>0.1.6</title>
+            <pubDate>Fri, 21 Aug 2026 17:32:32 -0500</pubDate>
+            <sparkle:version>0.1.6</sparkle:version>
+            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/jgassens/PubMate/releases/download/v0.1.5/PubMate-0.1.5-macos-universal2.dmg" length="36714581" type="application/octet-stream" sparkle:edSignature="u2N7CBKabHjMgPvHtKusV9Ejp5LjuywB5kJp/cnB+3HskLwoOzDgTIv9LGQkxBzgAgxG3KZG7G7cX7/R29TCCg=="/>
+            <enclosure url="https://github.com/jgassens/PubMate/releases/download/v0.1.6/PubMate-0.1.6-macos-universal2.dmg" length="35829820" type="application/octet-stream" sparkle:edSignature="IqKIno+ubkLmWPjYObn1GAuGofJrO5eLcTIRDrvjsmkxSL7aAeK2ER5JiDTvy9UXA6kuZmGpXudpNSbOZuOGAg=="/>
         </item>
     </channel>
 </rss>

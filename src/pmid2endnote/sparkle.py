@@ -1,124 +1,73 @@
-"""Sparkle auto-update bridge for the packaged macOS app.
-
-The normal CLI stays independent of Sparkle. This module is imported by the
-macOS launcher only, and every dependency is loaded lazily so source checkouts
-and tests can run without PyObjC or Sparkle.framework installed.
-"""
+"""Launch PubMate's native Sparkle updater helper from the macOS app."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 import os
-import platform
+import subprocess
 import sys
 
 
 DEFAULT_FEED_URL = "https://jgassens.github.io/PubMate/appcast.xml"
 DEFAULT_PUBLIC_ED_KEY = "HK2FMFt1/JlsEm52nLZ7X4cXo1nmLLJpAoRzB3y7tYQ="
-ENABLE_INTEL_SPARKLE_ENV = "PUBMATE_ENABLE_INTEL_SPARKLE"
-INTEL_SPARKLE_DISABLED_MESSAGE = (
-    "Sparkle auto-update is disabled on Intel Macs to avoid a PyObjC startup "
-    "hang; PubMate will still run normally."
-)
+UPDATER_HELPER_NAME = "PubMateUpdater"
 
-_framework_loaded = False
-_updater_controller: Any | None = None
+_updater_process: subprocess.Popen[bytes] | None = None
 
 
 def initialize_sparkle_updater() -> str | None:
-    """Start Sparkle's standard updater, returning a warning if unavailable."""
+    """Start the detached native updater, returning a warning if unavailable."""
 
     if os.environ.get("PUBMATE_DISABLE_SPARKLE") == "1":
         return None
 
-    skip_reason = _startup_skip_reason()
-    if skip_reason is not None:
-        return skip_reason
+    helper = _find_updater_helper()
+    if helper is None:
+        return "Sparkle auto-update is unavailable: PubMateUpdater was not found."
 
     try:
-        _load_sparkle_framework()
-        import objc  # type: ignore[import-not-found]
-
-        controller_class = objc.lookUpClass("SPUStandardUpdaterController")
-        controller = (
-            controller_class.alloc()
-            .initWithStartingUpdater_updaterDelegate_userDriverDelegate_(
-                True,
-                None,
-                None,
-            )
+        process = subprocess.Popen(
+            [str(helper)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
         )
-
-        global _updater_controller
-        _updater_controller = controller
-    except Exception as exc:  # pragma: no cover - depends on packaged macOS app
+        global _updater_process
+        _updater_process = process
+    except OSError as exc:  # pragma: no cover - depends on packaged macOS app
         return f"Sparkle auto-update is unavailable: {exc}"
 
     return None
 
 
 def validate_sparkle_runtime() -> str:
-    """Validate that the packaged app can load Sparkle.framework."""
+    """Validate the packaged native updater without starting a network check."""
 
     if os.environ.get("PUBMATE_DISABLE_SPARKLE") == "1":
         return "Sparkle runtime self-test skipped because PUBMATE_DISABLE_SPARKLE=1."
 
-    skip_reason = _startup_skip_reason()
-    if skip_reason is not None:
-        return skip_reason
+    helper = _find_updater_helper()
+    if helper is None:
+        raise RuntimeError("PubMateUpdater was not found in the app bundle")
 
-    _load_sparkle_framework()
-
-    import objc  # type: ignore[import-not-found]
-
-    controller_class = objc.lookUpClass("SPUStandardUpdaterController")
-    controller = (
-        controller_class.alloc()
-        .initWithStartingUpdater_updaterDelegate_userDriverDelegate_(
-            False,
-            None,
-            None,
-        )
+    completed = subprocess.run(
+        [str(helper), "--self-test"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
-    if controller is None:
-        raise RuntimeError("SPUStandardUpdaterController could not be created")
-    return "Sparkle runtime self-test OK"
+    output = completed.stdout.strip()
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or output or f"exit code {completed.returncode}"
+        raise RuntimeError(f"PubMateUpdater self-test failed: {detail}")
+    return output or "PubMate native Sparkle forced-update self-test OK"
 
 
-def _startup_skip_reason() -> str | None:
-    if _is_intel_runtime() and os.environ.get(ENABLE_INTEL_SPARKLE_ENV) != "1":
-        return INTEL_SPARKLE_DISABLED_MESSAGE
-    return None
-
-
-def _is_intel_runtime() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "x86_64"
-
-
-def _load_sparkle_framework() -> None:
-    global _framework_loaded
-
-    if _framework_loaded:
-        return
-
-    framework_path = _find_sparkle_framework()
-    if framework_path is None:
-        raise RuntimeError("Sparkle.framework was not found in the app bundle")
-
-    from Foundation import NSBundle  # type: ignore[import-not-found]
-
-    bundle = NSBundle.bundleWithPath_(str(framework_path))
-    if bundle is None:
-        raise RuntimeError(f"Could not create bundle for {framework_path}")
-    if not bundle.load():
-        raise RuntimeError(f"Could not load {framework_path}")
-
-    _framework_loaded = True
-
-
-def _find_sparkle_framework() -> Path | None:
-    override = os.environ.get("PUBMATE_SPARKLE_FRAMEWORK")
+def _find_updater_helper() -> Path | None:
+    override = os.environ.get("PUBMATE_UPDATER_HELPER")
     if override:
         path = Path(override)
         return path if path.exists() else None
@@ -126,13 +75,17 @@ def _find_sparkle_framework() -> Path | None:
     candidates: list[Path] = []
     executable = Path(sys.executable)
     if getattr(sys, "frozen", False):
-        candidates.append(executable.parent.parent / "Frameworks" / "Sparkle.framework")
+        candidates.append(executable.parent / UPDATER_HELPER_NAME)
 
     module_path = Path(__file__).resolve()
     candidates.extend(
         [
-            module_path.parents[2] / "dist" / "PubMate.app" / "Contents" / "Frameworks" / "Sparkle.framework",
-            module_path.parents[2] / "macos" / "vendor" / "Sparkle.framework",
+            module_path.parents[2]
+            / "dist"
+            / "PubMate.app"
+            / "Contents"
+            / "MacOS"
+            / UPDATER_HELPER_NAME,
         ]
     )
 

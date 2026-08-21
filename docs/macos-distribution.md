@@ -119,15 +119,23 @@ PubMate uses Sparkle for direct-distribution updates. The app bundle contains:
 Contents/Frameworks/Sparkle.framework
 SUFeedURL=https://jgassens.github.io/PubMate/appcast.xml
 SUPublicEDKey=<Sparkle EdDSA public key>
+SUEnableAutomaticChecks=true
+SUAllowsAutomaticUpdates=true
+SUAutomaticallyUpdate=true
+SUPromptUserOnFirstLaunch=false
 ```
 
-The build script embeds `Sparkle.framework`, sets the appcast keys in `Info.plist`, signs Sparkle's nested updater components, and runs a packaged `--sparkle-self-test` before creating the DMG.
-
-On Intel runtimes, PubMate skips Sparkle startup because importing the PyObjC
-bridge can hang before the launcher shows its file picker. The app still opens
-and processes documents normally; Apple Silicon builds continue to initialize
-Sparkle. Set `PUBMATE_ENABLE_INTEL_SPARKLE=1` only when deliberately testing the
-Intel Sparkle bridge.
+The build script embeds `Sparkle.framework` plus a universal native
+`Contents/MacOS/PubMateUpdater` helper, sets the appcast and mandatory update
+keys in `Info.plist`, signs every updater component, and runs a packaged
+`--sparkle-self-test` before creating the DMG. On every launch PubMate starts
+that helper in the background. The helper overrides stored preferences to keep
+automatic checks and downloads on, clears any saved Sparkle skip-version
+choice, verifies automatic updating is enabled, then forces an immediate
+background check. Sparkle downloads eligible updates without asking and
+installs them silently when PubMate exits. The helper runs natively on both
+Apple Silicon and Intel Macs and avoids loading Sparkle through Python or
+PyObjC.
 
 If Sparkle is not already available locally, resolve it once:
 
@@ -174,7 +182,9 @@ Commit and push the updated `docs/appcast.xml`, and make sure GitHub Pages serve
 https://jgassens.github.io/PubMate/appcast.xml
 ```
 
-Sparkle compares the installed app's `CFBundleVersion`/`CFBundleShortVersionString` with the appcast item and offers the newer notarized DMG when the version changes.
+Sparkle compares the installed app's `CFBundleVersion`/`CFBundleShortVersionString`
+with the appcast item, downloads the newer notarized DMG without consulting the
+user, and installs it silently when PubMate exits.
 
 ## Release Checklist
 
