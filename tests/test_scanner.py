@@ -26,6 +26,22 @@ def test_multiple_pmids_in_one_block_with_semicolon() -> None:
     assert blocks[0].pmids == ("12345678", "23456789")
 
 
+def test_repeated_labeled_pmids_in_manuscript_sentence() -> None:
+    text = (
+        "preparation, illustrating the broader challenge of preserving antigen structure "
+        "during bacterial inactivation.11-13 \u00a0"
+        "(PMID 38319200; PMID 38644097; PMID 27966556).   &#x20;"
+    )
+
+    blocks = scan_text(text)
+
+    assert [block.pmids for block in blocks] == [
+        ("38319200",),
+        ("38644097",),
+        ("27966556",),
+    ]
+
+
 def test_deduplication_preserves_first_seen_order() -> None:
     blocks = scan_text("PMID: 222 PMID: 111 PMIDs: 222, 333")
 

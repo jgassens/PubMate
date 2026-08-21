@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import shutil
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
 from docx import Document
 from docx.document import Document as DocxDocument
@@ -30,6 +30,16 @@ from pmid2endnote.scanner import (
 
 
 IdentifierKey = tuple[IdentifierKind, str]
+
+
+class TextRange(Protocol):
+    """A detected text block with offsets into a Word paragraph."""
+
+    start: int
+    end: int
+
+
+TextRangeT = TypeVar("TextRangeT", bound=TextRange)
 
 REFERENCE_SECTION_HEADINGS = {
     "references",
@@ -231,12 +241,11 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
                 _skipped_identifier_reports(blocks, location, reason="reference_section")
             )
             continue
-        if _paragraph_has_unsafe_fields(paragraph):
+        blocks, unsafe_blocks = _partition_blocks_around_unsafe_content(paragraph, blocks)
+        if unsafe_blocks:
             warnings.append(
-                "Skipped PMID block in paragraph with field or hidden text content at "
-                f"{location.part} paragraph {location.paragraph_index}."
+                _unsafe_content_warning(location, len(unsafe_blocks))
             )
-            continue
         occurrences.extend(DocumentPmidOccurrence(block=block, location=location) for block in blocks)
 
     if options.include_comments:
@@ -254,12 +263,11 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
                     _skipped_identifier_reports(blocks, location, reason="reference_section")
                 )
                 continue
-            if _paragraph_has_unsafe_fields(paragraph):
+            blocks, unsafe_blocks = _partition_blocks_around_unsafe_content(paragraph, blocks)
+            if unsafe_blocks:
                 warnings.append(
-                    "Skipped PMID block in paragraph with field or hidden text content at "
-                    f"{location.part} paragraph {location.paragraph_index}."
+                    _unsafe_content_warning(location, len(unsafe_blocks))
                 )
-                continue
             occurrences.extend(
                 DocumentPmidOccurrence(block=block, location=location) for block in blocks
             )
@@ -273,12 +281,11 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
         )
         if not blocks:
             continue
-        if _paragraph_has_unsafe_fields(paragraph):
+        blocks, unsafe_blocks = _partition_blocks_around_unsafe_content(paragraph, blocks)
+        if unsafe_blocks:
             warnings.append(
-                "Skipped PMID block in paragraph with field or hidden text content at "
-                f"{location.part} paragraph {location.paragraph_index}."
+                _unsafe_content_warning(location, len(unsafe_blocks))
             )
-            continue
         occurrences.extend(DocumentPmidOccurrence(block=block, location=location) for block in blocks)
 
     if skipped_identifiers:
@@ -543,6 +550,80 @@ def _paragraph_has_unsafe_fields(paragraph: Paragraph) -> bool:
     return any(marker in xml for marker in ("w:fldChar", "w:instrText", "w:vanish"))
 
 
+def _partition_blocks_around_unsafe_content(
+    paragraph: Paragraph,
+    blocks: list[TextRangeT],
+) -> tuple[list[TextRangeT], list[TextRangeT]]:
+    """Keep blocks outside Word fields/hidden runs and reject overlapping blocks.
+
+    Word and EndNote fields may safely coexist elsewhere in a paragraph. The
+    previous paragraph-wide check discarded ordinary PMID text beside an
+    existing citation field. If run offsets cannot be mapped exactly back to
+    ``paragraph.text``, this helper deliberately retains the old fail-closed
+    behavior.
+    """
+
+    if not _paragraph_has_unsafe_fields(paragraph):
+        return blocks, []
+
+    unsafe_ranges = _unsafe_text_ranges(paragraph)
+    if unsafe_ranges is None:
+        return [], blocks
+
+    safe: list[TextRangeT] = []
+    unsafe: list[TextRangeT] = []
+    for block in blocks:
+        target = unsafe if _range_overlaps_any(block.start, block.end, unsafe_ranges) else safe
+        target.append(block)
+    return safe, unsafe
+
+
+def _unsafe_text_ranges(paragraph: Paragraph) -> list[tuple[int, int]] | None:
+    """Return visible character spans controlled by fields or hidden formatting."""
+
+    runs = list(paragraph.runs)
+    if "".join(run.text for run in runs) != paragraph.text:
+        return None
+
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    field_depth = 0
+    for run in runs:
+        field_types = [
+            marker.get(qn("w:fldCharType"))
+            for marker in run._r.findall(qn("w:fldChar"))
+        ]
+        begin_count = field_types.count("begin")
+        end_count = field_types.count("end")
+        field_depth += begin_count
+
+        start = cursor
+        cursor += len(run.text)
+        is_hidden = bool(run._r.xpath(".//w:vanish"))
+        if cursor > start and (field_depth > 0 or is_hidden):
+            ranges.append((start, cursor))
+
+        field_depth = max(0, field_depth - end_count)
+
+    return ranges
+
+
+def _range_overlaps_any(
+    start: int,
+    end: int,
+    ranges: list[tuple[int, int]],
+) -> bool:
+    return any(start < range_end and end > range_start for range_start, range_end in ranges)
+
+
+def _unsafe_content_warning(location: TextLocation, count: int) -> str:
+    label = "identifier block" if count == 1 else "identifier blocks"
+    return (
+        f"Skipped {count} {label} overlapping field or hidden text content at "
+        f"{location.part} paragraph {location.paragraph_index}."
+    )
+
+
 def _replace_paragraph_blocks(
     *,
     paragraph: Paragraph,
@@ -565,21 +646,23 @@ def _replace_paragraph_blocks(
     if not blocks:
         return [], []
 
-    if _paragraph_has_unsafe_fields(paragraph):
-        return [], [
-            "Skipped PMID block in paragraph with field or hidden text content at "
-            f"{location.part} paragraph {location.paragraph_index}."
-        ]
-
     replacement_blocks = _replacement_blocks_for_text(
         text,
         scan_parenthetical_pmids=scan_parenthetical_pmids,
         scan_dois=scan_dois,
         scan_bare_dois=scan_bare_dois,
     )
+    replacement_blocks, unsafe_blocks = _partition_blocks_around_unsafe_content(
+        paragraph,
+        replacement_blocks,
+    )
     planned: list[tuple[ReplacementBlock, str]] = []
     report_replacements: list[dict[str, Any]] = []
-    warnings: list[str] = []
+    warnings = (
+        [_unsafe_content_warning(location, len(unsafe_blocks))]
+        if unsafe_blocks
+        else []
+    )
 
     for block in replacement_blocks:
         replacement_text = _replacement_for_block(

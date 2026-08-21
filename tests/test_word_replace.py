@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 from pmid2endnote.models import ReferenceRecord
 from pmid2endnote.pubmed import PubMedRecord
@@ -21,6 +23,26 @@ def _save_docx(path: Path, paragraphs: list[str]) -> None:
 
 def _read_paragraph_text(path: Path, index: int = 0) -> str:
     return Document(path).paragraphs[index].text
+
+
+def _add_word_field(paragraph, instruction: str, visible_text: str) -> None:
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    paragraph.add_run()._r.append(begin)
+
+    instruction_text = OxmlElement("w:instrText")
+    instruction_text.set(qn("xml:space"), "preserve")
+    instruction_text.text = instruction
+    paragraph.add_run()._r.append(instruction_text)
+
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    paragraph.add_run()._r.append(separate)
+    paragraph.add_run(visible_text)
+
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    paragraph.add_run()._r.append(end)
 
 
 def test_reference_section_heading_detection() -> None:
@@ -94,6 +116,75 @@ def test_word_replacement_preserves_first_replaced_run_formatting(tmp_path: Path
     output_paragraph = Document(output_docx).paragraphs[0]
     assert output_paragraph.text == "See {Smith, 2024, PMID-12345678} now."
     assert output_paragraph.runs[1].bold is True
+
+
+def test_replaces_pmids_beside_existing_endnote_field(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph(
+        "preparation, illustrating the broader challenge of preserving antigen structure "
+        "during bacterial inactivation."
+    )
+    _add_word_field(paragraph, " ADDIN EN.CITE existing-citation ", "11-13")
+    paragraph.add_run(
+        " \u00a0(PMID 38319200; PMID 38644097; PMID 27966556).   &#x20;"
+    )
+    document.save(input_docx)
+
+    scan = scan_docx(input_docx)
+
+    assert scan.unique_pmids == ["38319200", "38644097", "27966556"]
+    assert scan.warnings == []
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "38319200": PubMedRecord("38319200", "A", "2024"),
+            "38644097": PubMedRecord("38644097", "B", "2024"),
+            "27966556": PubMedRecord("27966556", "C", "2017"),
+        },
+    )
+
+    output_paragraph = Document(output_docx).paragraphs[0]
+    assert output_paragraph.text == (
+        "preparation, illustrating the broader challenge of preserving antigen structure "
+        "during bacterial inactivation.11-13 \u00a0"
+        "{A, 2024, PMID-38319200;B, 2024, PMID-38644097;C, 2017, PMID-27966556}.   "
+        "&#x20;"
+    )
+    assert len(output_paragraph._p.xpath(".//w:fldChar")) == 3
+    assert len(output_paragraph._p.xpath(".//w:instrText")) == 1
+    assert result.warnings == []
+
+
+def test_identifier_inside_existing_word_field_remains_untouched(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    _add_word_field(paragraph, " ADDIN EN.CITE existing-citation ", "PMID 38319200")
+    paragraph.add_run(" after PMID 38644097.")
+    document.save(input_docx)
+
+    scan = scan_docx(input_docx)
+
+    assert scan.unique_pmids == ["38644097"]
+    assert "overlapping field" in scan.warnings[0]
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "38319200": PubMedRecord("38319200", "Unsafe", "2024"),
+            "38644097": PubMedRecord("38644097", "Safe", "2024"),
+        },
+    )
+
+    assert Document(output_docx).paragraphs[0].text == (
+        "Before PMID 38319200 after {Safe, 2024, PMID-38644097}."
+    )
 
 
 def test_unresolved_pmid_handling_leaves_unresolved_text(tmp_path: Path) -> None:
