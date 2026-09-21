@@ -6,7 +6,11 @@ PubMate can be distributed as a normal double-clickable macOS app bundle:
 PubMate.app
 ```
 
-The app uses native macOS dialogs to choose a Word `.docx`, ask for the PubMed email address the first time it is needed, and run the same processing service as the CLI. It does not rely on Tkinter.
+The app opens a Tkinter drop-zone window backed by `tkinterdnd2`. Users can
+drop one Word `.docx` or click to choose it, and the Settings window stores the
+required NCBI email plus the optional API key and scanning preferences. If
+Tkinter cannot be imported, the launcher retains the older native macOS dialog
+flow as a fallback.
 
 ## Build A Local App
 
@@ -45,14 +49,18 @@ Open the app bundle:
 open dist/PubMate.app
 ```
 
-Use a disposable Word test document first. A successful run should create these files next to the input document:
+Use a disposable Word test document first. A successful run creates a dated
+folder under `~/Library/Application Support/PubMate/Conversions` containing:
 
 ```text
 <name>.endnote.docx
 <name>.endnote-import.enw
-<name>.references.nbib
-<name>.pmid2endnote.report.json
 ```
+
+The app reveals that folder after the run. Settings retain conversion folders
+for 7, 14, 30, or 90 days (30 by default). The `.references.nbib` and
+`.pmid2endnote.report.json` debugging outputs are off by default and can be
+enabled in Settings.
 
 Import the `.endnote-import.enw` file into EndNote using the **EndNote Import** option, then open the `.endnote.docx` in Word and run **EndNote > Update Citations and Bibliography**.
 

@@ -202,6 +202,35 @@ clean_macos_metadata() {
   find "$target" -exec xattr -c {} + 2>/dev/null || true
 }
 
+prune_tkdnd_platforms() {
+  local root="$1"
+  local tkdnd_root directory platform
+  local removed=()
+
+  for tkdnd_root in \
+    "$root/Contents/Frameworks/tkinterdnd2/tkdnd" \
+    "$root/Contents/Resources/tkinterdnd2/tkdnd"; do
+    [[ -d "$tkdnd_root" ]] || continue
+    while IFS= read -r -d '' directory; do
+      platform="${directory:t}"
+      case "$platform" in
+        osx-arm64|osx-x64)
+          ;;
+        *)
+          rm -rf -- "$directory"
+          removed+=("${directory#$root/}")
+          ;;
+      esac
+    done < <(find "$tkdnd_root" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print0)
+  done
+
+  if (( ${#removed[@]} )); then
+    echo "Removed tkdnd platform directories: ${(j:, :)removed}"
+  else
+    echo "Removed tkdnd platform directories: none"
+  fi
+}
+
 find_sparkle_framework() {
   if [[ -n "$SPARKLE_FRAMEWORK_PATH" ]]; then
     if [[ -d "$SPARKLE_FRAMEWORK_PATH" ]]; then
@@ -316,6 +345,9 @@ require_macho_archs() {
     inspected=$((inspected + 1))
     archs="$(lipo -archs "$binary" 2>/dev/null || true)"
     display_path="${binary#$APP_STAGE_PATH/}"
+    if [[ "$display_path" == *"tkinterdnd2/tkdnd/osx-arm64/"*.dylib || "$display_path" == *"tkinterdnd2/tkdnd/osx-x64/"*.dylib ]]; then
+      continue
+    fi
     if [[ -z "$archs" ]]; then
       echo "Could not inspect architectures for bundled Mach-O file: $display_path" >&2
       failures=1
@@ -342,6 +374,46 @@ require_macho_archs() {
   fi
 }
 
+require_tkdnd_archs() {
+  local root="$1"
+  local tkdnd_root="$root/Contents/Frameworks/tkinterdnd2/tkdnd"
+  local directories=()
+  local directory required_arch binary archs found_matching_dylib
+
+  case "$TARGET_ARCH" in
+    universal2)
+      directories=("osx-arm64:arm64" "osx-x64:x86_64")
+      ;;
+    arm64)
+      directories=("osx-arm64:arm64")
+      ;;
+    x86_64)
+      directories=("osx-x64:x86_64")
+      ;;
+  esac
+
+  for directory in "${directories[@]}"; do
+    required_arch="${directory#*:}"
+    directory="$tkdnd_root/${directory%%:*}"
+    found_matching_dylib=0
+    if [[ -d "$directory" ]]; then
+      while IFS= read -r -d '' binary; do
+        archs="$(lipo -archs "$binary" 2>/dev/null || true)"
+        if [[ " $archs " == *" $required_arch "* ]]; then
+          found_matching_dylib=1
+          break
+        fi
+      done < <(find "$directory" -maxdepth 1 -type f -name '*.dylib' -print0)
+    fi
+
+    if [[ "$found_matching_dylib" -ne 1 ]]; then
+      echo "tkdnd architecture validation failed: expected a $required_arch dylib in ${directory#$root/}." >&2
+      echo "tkinterdnd2 must bundle the platform-specific tkdnd dylib selected at runtime." >&2
+      exit 1
+    fi
+  done
+}
+
 "$PYTHON" -m PyInstaller \
   --noconfirm \
   --clean \
@@ -352,6 +424,8 @@ require_macho_archs() {
   --icon "$ICON_PATH" \
   --osx-bundle-identifier "$BUNDLE_ID" \
   --collect-data docx \
+  --collect-all tkinterdnd2 \
+  --hidden-import tkinter \
   --paths "$PROJECT_DIR/src" \
   --distpath "$STAGE_DIST_DIR" \
   --workpath "$BUILD_DIR/pyinstaller" \
@@ -364,6 +438,7 @@ if [[ ! -d "$APP_STAGE_PATH" ]]; then
 fi
 
 clean_macos_metadata "$APP_STAGE_PATH"
+prune_tkdnd_platforms "$APP_STAGE_PATH"
 
 DOCX_TEMPLATES_SOURCE="$STAGE_DIST_DIR/$APP_NAME/_internal/docx/templates"
 if [[ -d "$DOCX_TEMPLATES_SOURCE" ]]; then
@@ -383,6 +458,7 @@ if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
   build_sparkle_helper "$APP_STAGE_PATH/Contents/Frameworks"
 fi
 
+require_tkdnd_archs "$APP_STAGE_PATH"
 require_macho_archs "$APP_STAGE_PATH"
 
 plist_set_string() {

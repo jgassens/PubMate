@@ -225,17 +225,24 @@ Tables, Word comments, and reference-section skipping are included by default. H
 
 The original input document is left untouched. `--backup` is available if you want an extra safety copy, but it is not needed for the normal workflow because PubMate writes changes only to the separate `.endnote.docx` file.
 
-## macOS Launcher
+## Desktop GUI
 
-This repository includes a double-clickable launcher:
+The packaged macOS app and the `pmid2endnote-gui` command open the same PubMate
+drop-zone window. Drop one Word `.docx` onto the window or click the drop zone
+to choose it, then use **PubMate > Settings…** to configure NCBI access and
+scanning preferences.
+
+On macOS, each run gets a dated folder under:
 
 ```text
-macos/PMID2EndNote.command
+~/Library/Application Support/PubMate/Conversions
 ```
 
-The launcher uses built-in macOS dialogs to choose a Word file and enter the PubMed email/API key. It runs the same processing code as the CLI.
-
-Each run also asks whether to scan raw parenthetical PMID placeholders and whether to ignore identifiers after a References/Bibliography heading. The reference-section skip prompt defaults to Yes.
+PubMate reveals that folder when conversion finishes. Settings can retain
+converted folders for 7, 14, 30, or 90 days (30 by default). The auxiliary
+`.nbib` file and JSON report are debugging outputs and are off by default in
+the GUI; the `.endnote.docx` and canonical `.endnote-import.enw` are always
+written when conversion succeeds.
 
 The first time PubMate needs PubMed access, it asks for an email address and saves it here:
 
@@ -261,7 +268,7 @@ dist/PubMate.app
 dist/PubMate-<version>-macos-universal2.dmg
 ```
 
-The app uses native macOS dialogs and the same processing engine as the CLI. The default release build is universal2, so the same DMG runs on Apple Silicon and Intel Macs. For universal builds, use a universal Python runtime such as the python.org framework build; an arm64-only Homebrew Python can only create an Apple Silicon-only app. The build script verifies the finished `.app` and fails if any bundled native binary is missing either architecture slice.
+The app uses the Tkinter drop-zone GUI and the same processing engine as the CLI. The default release build is universal2, so the same DMG runs on Apple Silicon and Intel Macs. For universal builds, use a universal Python runtime such as the python.org framework build; an arm64-only Homebrew Python can only create an Apple Silicon-only app. The build script verifies the finished `.app` and fails if any bundled native binary other than tkinterdnd2's platform-selected drag-and-drop library is missing either architecture slice.
 
 The default build is ad-hoc signed for local testing. For public distribution, build with a Developer ID certificate and notarize the DMG:
 

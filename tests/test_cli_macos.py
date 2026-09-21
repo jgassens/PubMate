@@ -124,13 +124,24 @@ def test_cli_passes_backup_default_and_flag(monkeypatch, tmp_path: Path) -> None
     assert captured["create_backup"] is True
 
 
-def test_macos_launcher_prompts_and_passes_parenthetical_flag() -> None:
-    launcher = Path("macos/PMID2EndNote.command").read_text(encoding="utf-8")
+def test_cli_keeps_auxiliary_output_defaults_enabled(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
 
-    assert "Scan raw parenthetical PMID citations like (6426050) or (6426050, 104929)?" in launcher
-    assert 'ARGS+=("--scan-parenthetical-pmids")' in launcher
-    assert 'default button "No"' in launcher
-    assert "Ignore PMIDs/DOIs after a References/Bibliography heading?" in launcher
-    assert 'ARGS+=("--no-skip-reference-section")' in launcher
-    assert 'default button "Yes"' in launcher
-    assert ".endnote-import.enw" in launcher
+    def fake_process(options):
+        captured["write_nbib"] = options.write_nbib
+        captured["write_report"] = options.write_report
+        return ProcessingResult(
+            exit_code=0,
+            report={},
+            output_docx=tmp_path / "out.docx",
+            nbib_file=tmp_path / "out.nbib",
+            enw_file=tmp_path / "out.enw",
+            report_file=tmp_path / "out.json",
+            messages=(),
+        )
+
+    monkeypatch.setattr(cli, "process_document", fake_process)
+
+    cli.main([str(tmp_path / "input.docx"), "--email", "test@example.edu"])
+
+    assert captured == {"write_nbib": True, "write_report": True}

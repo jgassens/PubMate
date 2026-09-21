@@ -1,3 +1,4 @@
+import builtins
 from pathlib import Path
 import py_compile
 import shutil
@@ -81,6 +82,12 @@ def test_build_script_embeds_sparkle_metadata() -> None:
     assert "Sparkle.framework" in text
     assert "--argv-emulation" in text
     assert "--collect-data docx" in text
+    assert "--collect-all tkinterdnd2" in text
+    assert "--hidden-import tkinter" in text
+    assert "require_tkdnd_archs" in text
+    assert '"osx-arm64:arm64" "osx-x64:x86_64"' in text
+    assert "tkdnd architecture validation failed" in text
+    assert '*"tkinterdnd2/tkdnd/"*' not in text
     assert "Contents/Frameworks/docx/templates" in text
     assert "Contents/Frameworks/docx/parts" in text
     assert "CFBundleDocumentTypes" in text
@@ -117,6 +124,22 @@ def test_build_script_embeds_sparkle_metadata() -> None:
         '"$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test'
     )
     assert text.index("--sparkle-self-test") < text.index("codesign --verify --deep --strict")
+
+
+def test_build_script_prunes_unsupported_tkdnd_platforms() -> None:
+    text = Path("macos/build_distribution.sh").read_text(encoding="utf-8")
+    prune_function = text.split("prune_tkdnd_platforms()", 1)[1].split(
+        "find_sparkle_framework()", 1
+    )[0]
+
+    assert "prune_tkdnd_platforms()" in text
+    assert "-type l" in prune_function
+    assert '"$root/Contents/Frameworks/tkinterdnd2/tkdnd"' in text
+    assert '"$root/Contents/Resources/tkinterdnd2/tkdnd"' in text
+    assert "osx-arm64|osx-x64" in text
+    assert text.index('prune_tkdnd_platforms "$APP_STAGE_PATH"') < text.index(
+        'require_tkdnd_archs "$APP_STAGE_PATH"'
+    )
 
 
 def test_sparkle_appcast_helper_targets_github_releases() -> None:
@@ -209,56 +232,34 @@ def _patch_lightweight_processing(monkeypatch) -> None:
     )
 
 
+def _force_tkinter_fallback(monkeypatch) -> None:
+    original_import = builtins.__import__
+
+    def import_without_tkinter(name, *args, **kwargs):
+        if name == "tkinter":
+            raise ModuleNotFoundError("tkinter unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_tkinter)
+
+
 def test_macos_launcher_uses_dropped_docx_path(monkeypatch, tmp_path: Path) -> None:
+    from pmid2endnote import gui
+
     input_docx = tmp_path / "dropped.docx"
     input_docx.write_bytes(b"fake docx bytes")
     captured = {}
-    alerts = []
-    yes_no_answers = iter([False, True])
 
-    monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
     monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
-    _patch_lightweight_processing(monkeypatch)
-    monkeypatch.setattr(
-        macos_launcher,
-        "_choose_docx",
-        lambda: (_ for _ in ()).throw(AssertionError("file picker should not open")),
-    )
-    monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: "test@example.edu")
-    monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: "")
-    monkeypatch.setattr(
-        macos_launcher,
-        "_prompt_yes_no",
-        lambda prompt, default_yes: next(yes_no_answers),
-    )
-    monkeypatch.setattr(
-        macos_launcher,
-        "_display_alert",
-        lambda title, message=None: alerts.append((title, message)),
-    )
 
-    def fake_process_document(options, *, status_callback=None):
-        captured["options"] = options
-        if status_callback:
-            status_callback("Working")
-        return SimpleNamespace(
-            exit_code=0,
-            report={},
-            output_docx=tmp_path / "output.docx",
-            nbib_file=tmp_path / "output.nbib",
-            enw_file=tmp_path / "output.enw",
-            report_file=tmp_path / "report.json",
-            messages=("done",),
-        )
+    def fake_gui_run(initial_docx=None):
+        captured["path"] = initial_docx
+        return 0
 
-    monkeypatch.setattr(macos_launcher, "process_document", fake_process_document)
+    monkeypatch.setattr(gui, "run", fake_gui_run)
 
     assert macos_launcher.main([str(input_docx)]) == 0
-    assert captured["options"].input_docx == input_docx
-    assert captured["options"].email == "test@example.edu"
-    assert captured["options"].scan_parenthetical_pmids is False
-    assert captured["options"].skip_reference_section is True
-    assert alerts[0][0] == "PubMate finished."
+    assert captured["path"] == input_docx
 
 
 def test_macos_launcher_reprompts_after_blank_email(monkeypatch, tmp_path: Path) -> None:
@@ -271,6 +272,7 @@ def test_macos_launcher_reprompts_after_blank_email(monkeypatch, tmp_path: Path)
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
     monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    _force_tkinter_fallback(monkeypatch)
     _patch_lightweight_processing(monkeypatch)
     monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: None)
     monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: next(prompts))
@@ -311,6 +313,7 @@ def test_macos_launcher_closes_from_missing_email_prompt(monkeypatch, tmp_path: 
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
     monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    _force_tkinter_fallback(monkeypatch)
     monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: None)
     monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: "")
     monkeypatch.setattr(macos_launcher, "_prompt_missing_email_retry", lambda: False)
@@ -360,6 +363,7 @@ def test_macos_launcher_reports_unexpected_processing_error(monkeypatch, tmp_pat
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
     monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
+    _force_tkinter_fallback(monkeypatch)
     _patch_lightweight_processing(monkeypatch)
     monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: "test@example.edu")
     monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: "")

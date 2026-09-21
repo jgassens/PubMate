@@ -1,8 +1,4 @@
-"""macOS dialog-based launcher for PubMate.
-
-This module avoids Tkinter so the packaged macOS app can run as a small native
-wrapper around the same processing service used by the CLI.
-"""
+"""macOS launcher for the PubMate desktop application."""
 
 from __future__ import annotations
 
@@ -43,10 +39,6 @@ def main(argv: list[str] | None = None) -> int:
         print(sparkle.validate_sparkle_runtime())
         return 0
 
-    if shutil.which("osascript") is None:
-        print("PubMate macOS launcher requires osascript. Use the CLI instead.", file=sys.stderr)
-        return 2
-
     sparkle_warning = sparkle.initialize_sparkle_updater()
     if sparkle_warning:
         print(sparkle_warning, file=sys.stderr)
@@ -55,6 +47,24 @@ def main(argv: list[str] | None = None) -> int:
     if launch_error:
         _display_alert("PubMate could not open that file.", launch_error)
         return 1
+
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        return _run_osascript_flow(input_docx)
+
+    from pmid2endnote import gui
+
+    return gui.run(input_docx)
+
+
+def _run_osascript_flow(input_docx: Path | None) -> int:
+    """Run the legacy dialog flow when Python was built without Tkinter."""
+
+    if shutil.which("osascript") is None:
+        print("PubMate macOS launcher requires osascript. Use the CLI instead.", file=sys.stderr)
+        return 2
+
     if input_docx is None:
         input_docx = _choose_docx()
     if input_docx is None:

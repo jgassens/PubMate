@@ -182,6 +182,51 @@ def test_dry_run_does_not_require_written_nbib_or_docx(tmp_path: Path, monkeypat
     assert result.report["pmid_statuses"][0]["replacement_count"] == 1
 
 
+def test_optional_nbib_and_report_can_be_disabled(tmp_path: Path, monkeypatch) -> None:
+    class NoNbibClient(FakePubMedClient):
+        def fetch_nbib(self, pmids):
+            raise AssertionError("NBIB fetch must be skipped")
+
+    monkeypatch.setattr(app, "PubMedClient", NoNbibClient)
+    monkeypatch.setattr(
+        app,
+        "write_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("report writer must be skipped")
+        ),
+    )
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "input.endnote.docx"
+    nbib_file = tmp_path / "input.references.nbib"
+    report_file = tmp_path / "input.report.json"
+    _save_docx(input_docx, "PMID: 6426050")
+
+    result = process_document(
+        ProcessingOptions(
+            input_docx=input_docx,
+            email="test@example.edu",
+            output_docx=output_docx,
+            nbib_file=nbib_file,
+            report_file=report_file,
+            write_nbib=False,
+            write_report=False,
+            save_email=False,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert output_docx.exists()
+    assert result.enw_file.exists()
+    assert not nbib_file.exists()
+    assert not report_file.exists()
+    assert not any(".nbib" in message for message in result.messages)
+    assert not any("Wrote report:" in message for message in result.messages)
+    assert result.report["resolved_pmids"] == ["6426050"]
+    assert not any("nbib" in warning.lower() for warning in result.report["warnings"])
+    assert not any("nbib" in str(status).lower() for status in result.report["pmid_statuses"])
+    assert result.report["pmid_statuses"][0]["included_in_enw"] is True
+
+
 def test_reference_section_skipped_identifiers_do_not_enter_import_or_statuses(
     tmp_path: Path,
     monkeypatch,

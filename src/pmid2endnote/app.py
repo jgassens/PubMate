@@ -66,6 +66,8 @@ class ProcessingOptions:
     doi_source: str = "auto"
     import_format: str = "enw"
     save_email: bool = True
+    write_nbib: bool = True
+    write_report: bool = True
 
 
 @dataclass(frozen=True)
@@ -115,7 +117,7 @@ def process_document(
     if options.import_format != "enw":
         message = "Only EndNote Tagged Import format is supported: --import-format enw"
         report["errors"].append(message)
-        write_report(report, report_file)
+        _write_report_if_enabled(report, report_file, options.write_report)
         return ProcessingResult(2, report, output_docx, nbib_file, enw_file, report_file, (message,))
 
     replacement_options = ReplacementOptions(
@@ -139,7 +141,7 @@ def process_document(
         scan_result = scan_docx(input_docx, replacement_options)
     except InputDocumentError as exc:
         report["errors"].append(str(exc))
-        write_report(report, report_file)
+        _write_report_if_enabled(report, report_file, options.write_report)
         return ProcessingResult(2, report, output_docx, nbib_file, enw_file, report_file, (str(exc),))
 
     report["warnings"].extend(scan_result.warnings)
@@ -158,7 +160,7 @@ def process_document(
     source_map = _source_map(scan_result)
 
     if not scan_result.unique_identifiers:
-        write_report(report, report_file)
+        _write_report_if_enabled(report, report_file, options.write_report)
         if scan_result.skipped_identifiers:
             messages.append(
                 "No processable PMID or DOI blocks were found outside the detected reference section. "
@@ -168,7 +170,8 @@ def process_document(
             messages.append(
                 "No matching PMID or DOI blocks were found. No Word or EndNote files were written."
             )
-        messages.append(f"Wrote report: {report_file}")
+        if options.write_report:
+            messages.append(f"Wrote report: {report_file}")
         return ProcessingResult(0, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
 
     email = resolve_email(options.email)
@@ -178,7 +181,7 @@ def process_document(
             "pass --email, or set PMID2ENDNOTE_EMAIL."
         )
         report["errors"].append(message)
-        write_report(report, report_file)
+        _write_report_if_enabled(report, report_file, options.write_report)
         return ProcessingResult(2, report, output_docx, nbib_file, enw_file, report_file, (message,))
 
     if options.save_email:
@@ -204,6 +207,7 @@ def process_document(
         report["resolved_pmids"] = resolved_pmids
         report["unresolved_pmids"] = unresolved_pmids
         included_keys: set[str] = set()
+        included_pmids_in_enw: set[str] = set()
         included_pmids_in_nbib: set[str] = set()
 
         unresolved_identifiers = [
@@ -232,8 +236,12 @@ def process_document(
                 replacements=[],
                 sources_by_pmid=source_map,
                 warnings_by_pmid=_warnings_by_pmid(scan_result.unique_pmids, report["warnings"]),
+                included_in_nbib=options.write_nbib,
             )
-            write_report(report, report_file)
+            _write_report_if_enabled(report, report_file, options.write_report)
+            result_messages = ["Error: no identifiers could be resolved."]
+            if options.write_report:
+                result_messages.append(f"Wrote report: {report_file}")
             return ProcessingResult(
                 2,
                 report,
@@ -241,7 +249,7 @@ def process_document(
                 nbib_file,
                 enw_file,
                 report_file,
-                ("Error: no identifiers could be resolved.", f"Wrote report: {report_file}"),
+                tuple(result_messages),
             )
 
         if not options.dry_run:
@@ -249,6 +257,7 @@ def process_document(
             enw_file.parent.mkdir(parents=True, exist_ok=True)
             enw_file.write_text(write_enw(records), encoding="utf-8")
             included_keys, enw_errors = validate_enw_file(enw_file, records)
+            included_pmids_in_enw = _pmids_for_citation_keys(records, included_keys)
             if enw_errors:
                 report["errors"].extend(enw_errors)
                 report["identifier_statuses"] = build_identifier_statuses(
@@ -260,32 +269,41 @@ def process_document(
                 report["pmid_statuses"] = build_pmid_statuses(
                     scan_result=scan_result,
                     resolved_pmids=set(resolved_pmids),
-                    included_pmids=set(),
+                    included_pmids=(
+                        set() if options.write_nbib else included_pmids_in_enw
+                    ),
                     replacements=[],
                     sources_by_pmid=source_map,
                     warnings_by_pmid=_warnings_by_pmid(scan_result.unique_pmids, enw_errors),
+                    included_in_nbib=options.write_nbib,
                 )
-                write_report(report, report_file)
+                _write_report_if_enabled(report, report_file, options.write_report)
                 messages.extend(
                     [
                         "Error: .endnote-import.enw validation failed.",
                         "The Word document was not modified.",
-                        f"Wrote report: {report_file}",
                     ]
                 )
+                if options.write_report:
+                    messages.append(f"Wrote report: {report_file}")
                 return ProcessingResult(
                     2, report, output_docx, nbib_file, enw_file, report_file, tuple(messages)
                 )
 
-            included_pmids_in_nbib = _write_auxiliary_nbib(
-                client=client,
-                records=records,
-                nbib_file=nbib_file,
-                warnings=report["warnings"],
-            )
+            if options.write_nbib:
+                included_pmids_in_nbib = _write_auxiliary_nbib(
+                    client=client,
+                    records=records,
+                    nbib_file=nbib_file,
+                    warnings=report["warnings"],
+                )
         else:
             included_keys = {record.citation_key for record in records}
-            included_pmids_in_nbib = _dry_run_auxiliary_nbib_pmids(client, records, report["warnings"])
+            included_pmids_in_enw = _pmids_for_citation_keys(records, included_keys)
+            if options.write_nbib:
+                included_pmids_in_nbib = _dry_run_auxiliary_nbib_pmids(
+                    client, records, report["warnings"]
+                )
 
         status("Writing modified Word document...")
         replacement_result = replace_pmids_in_docx(
@@ -300,7 +318,10 @@ def process_document(
             report["warnings"].append(f"Created backup copy: {replacement_result.backup_path}")
         if not options.dry_run and not output_docx.exists():
             report["errors"].append(f"Modified Word document was not written: {output_docx}")
-            write_report(report, report_file)
+            _write_report_if_enabled(report, report_file, options.write_report)
+            result_messages = ["Error: modified Word document was not written."]
+            if options.write_report:
+                result_messages.append(f"Wrote report: {report_file}")
             return ProcessingResult(
                 2,
                 report,
@@ -308,7 +329,7 @@ def process_document(
                 nbib_file,
                 enw_file,
                 report_file,
-                ("Error: modified Word document was not written.", f"Wrote report: {report_file}"),
+                tuple(result_messages),
             )
 
         report["identifier_statuses"] = build_identifier_statuses(
@@ -320,10 +341,13 @@ def process_document(
         report["pmid_statuses"] = build_pmid_statuses(
             scan_result=scan_result,
             resolved_pmids=set(resolved_pmids),
-            included_pmids=included_pmids_in_nbib,
+            included_pmids=(
+                included_pmids_in_nbib if options.write_nbib else included_pmids_in_enw
+            ),
             replacements=replacement_result.replacements,
             sources_by_pmid=source_map,
             warnings_by_pmid=_warnings_by_pmid(scan_result.unique_pmids, report["warnings"]),
+            included_in_nbib=options.write_nbib,
         )
 
     except (PubMedFetchError, PubMedParseError) as exc:
@@ -342,15 +366,17 @@ def process_document(
             replacements=[],
             sources_by_pmid=source_map,
             warnings_by_pmid={pmid: [str(exc)] for pmid in scan_result.unique_pmids},
+            included_in_nbib=options.write_nbib,
         )
-        write_report(report, report_file)
+        _write_report_if_enabled(report, report_file, options.write_report)
         messages.extend(
             [
                 f"Error: {exc}",
                 "The Word document was not modified.",
-                f"Wrote report: {report_file}",
             ]
         )
+        if options.write_report:
+            messages.append(f"Wrote report: {report_file}")
         return ProcessingResult(2, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
     except PMID2EndNoteError as exc:
         report["errors"].append(str(exc))
@@ -368,32 +394,39 @@ def process_document(
             replacements=report["replacements"],
             sources_by_pmid=source_map,
             warnings_by_pmid={pmid: [str(exc)] for pmid in scan_result.unique_pmids},
+            included_in_nbib=options.write_nbib,
         )
-        write_report(report, report_file)
-        messages.extend([f"Error: {exc}", f"Wrote report: {report_file}"])
+        _write_report_if_enabled(report, report_file, options.write_report)
+        messages.append(f"Error: {exc}")
+        if options.write_report:
+            messages.append(f"Wrote report: {report_file}")
         return ProcessingResult(2, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
 
-    write_report(report, report_file)
+    _write_report_if_enabled(report, report_file, options.write_report)
 
     if options.dry_run:
-        messages.extend(
-            [
-                "Dry run complete. No .docx, .enw, or .nbib files were written.",
-                f"Wrote report: {report_file}",
-            ]
+        unwritten = ".docx, .enw, or .nbib" if options.write_nbib else ".docx or .enw"
+        messages.append(
+            f"Dry run complete. No {unwritten} files were written."
         )
+        if options.write_report:
+            messages.append(f"Wrote report: {report_file}")
     else:
         messages.extend(
             [
                 f"Wrote modified Word document: {output_docx}",
                 f"Wrote EndNote Tagged Import file: {enw_file}",
-                f"Wrote auxiliary PubMed/NLM file: {nbib_file}"
-                if nbib_file.exists()
-                else "No auxiliary .references.nbib file was written because no PubMed records were resolved.",
-                f"Wrote report: {report_file}",
-                ENDNOTE_INSTRUCTIONS.format(enw_file=enw_file, output_docx=output_docx),
             ]
         )
+        if options.write_nbib:
+            messages.append(
+                f"Wrote auxiliary PubMed/NLM file: {nbib_file}"
+                if nbib_file.exists()
+                else "No auxiliary .references.nbib file was written because no PubMed records were resolved."
+            )
+        if options.write_report:
+            messages.append(f"Wrote report: {report_file}")
+        messages.append(ENDNOTE_INSTRUCTIONS.format(enw_file=enw_file, output_docx=output_docx))
 
     return ProcessingResult(0, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
 
@@ -455,6 +488,7 @@ def build_pmid_statuses(
     replacements: list[dict],
     sources_by_pmid: dict[str, set[str]],
     warnings_by_pmid: dict[str, list[str]] | None = None,
+    included_in_nbib: bool = True,
 ) -> list[dict]:
     """Build per-PMID compatibility report statuses."""
 
@@ -472,20 +506,24 @@ def build_pmid_statuses(
         if pmid not in resolved_pmids and not any("unresolved" in warning.lower() for warning in warnings):
             warnings.append("PMID was unresolved by PubMed.")
         if pmid in resolved_pmids and pmid not in included_pmids:
-            warnings.append("PMID was resolved but not validated in the auxiliary .nbib file.")
+            if included_in_nbib:
+                warnings.append("PMID was resolved but not validated in the auxiliary .nbib file.")
+            else:
+                warnings.append("PMID was resolved but not validated in the EndNote import file.")
         if replacement_counts.get(pmid, 0) == 0:
             warnings.append("PMID was not replaced in the Word document.")
 
-        statuses.append(
-            {
-                "pmid": pmid,
-                "resolved": pmid in resolved_pmids,
-                "included_in_nbib": pmid in included_pmids,
-                "replacement_count": replacement_counts.get(pmid, 0),
-                "sources": sorted(sources_by_pmid.get(pmid, set())),
-                "warnings": _dedupe(warnings),
-            }
+        status = {
+            "pmid": pmid,
+            "resolved": pmid in resolved_pmids,
+            "replacement_count": replacement_counts.get(pmid, 0),
+            "sources": sorted(sources_by_pmid.get(pmid, set())),
+            "warnings": _dedupe(warnings),
+        }
+        status["included_in_nbib" if included_in_nbib else "included_in_enw"] = (
+            pmid in included_pmids
         )
+        statuses.append(status)
     return statuses
 
 
@@ -507,6 +545,18 @@ def _resolved_pmids(records: Iterable[ReferenceRecord]) -> list[str]:
             seen.add(record.pmid)
             ordered.append(record.pmid)
     return ordered
+
+
+def _pmids_for_citation_keys(
+    records: Iterable[ReferenceRecord], included_keys: set[str]
+) -> set[str]:
+    """Return PMIDs represented by validated EndNote import records."""
+
+    return {
+        record.pmid
+        for record in records
+        if record.pmid is not None and record.citation_key in included_keys
+    }
 
 
 def _write_auxiliary_nbib(
@@ -543,6 +593,11 @@ def _dry_run_auxiliary_nbib_pmids(
     except PubMedFetchError as exc:
         warnings.append(f"Auxiliary .nbib dry-run validation failed: {exc}")
         return set()
+
+
+def _write_report_if_enabled(report: dict, report_file: Path, enabled: bool) -> None:
+    if enabled:
+        write_report(report, report_file)
 
 
 def _replacement_counts(replacements: list[dict]) -> Counter[IdentifierKey]:
