@@ -246,7 +246,7 @@ find_sparkle_framework() {
     "$PROJECT_DIR/macos/SparkleSupport/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
     "$PROJECT_DIR/macos/SparkleSupport/.build/arm64-apple-macosx/release/Sparkle.framework"
     "$PROJECT_DIR/macos/SparkleSupport/.build/arm64-apple-macosx/debug/Sparkle.framework"
-    "$HOME/Documents/programming/word-history/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+    "$HOME/programming/word-history/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
   )
 
   for candidate in "${candidates[@]}"; do

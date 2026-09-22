@@ -50,7 +50,7 @@ find_generate_appcast() {
   local candidates=(
     "$PROJECT_DIR/macos/SparkleSupport/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
     "$PROJECT_DIR/macos/SparkleSupport/.build/checkouts/Sparkle/generate_appcast"
-    "$HOME/Documents/programming/word-history/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+    "$HOME/programming/word-history/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
   )
 
   for candidate in "${candidates[@]}"; do
