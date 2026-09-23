@@ -15,6 +15,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 
 from pmid2endnote.endnote import make_temporary_citation
 from pmid2endnote.errors import InputDocumentError, WordProcessingError
@@ -547,7 +548,10 @@ def _iter_comment_paragraphs(
 
 def _paragraph_has_unsafe_fields(paragraph: Paragraph) -> bool:
     xml = paragraph._p.xml
-    return any(marker in xml for marker in ("w:fldChar", "w:instrText", "w:vanish"))
+    return any(
+        marker in xml
+        for marker in ("w:fldChar", "w:instrText", "w:vanish", "w:hyperlink")
+    )
 
 
 def _partition_blocks_around_unsafe_content(
@@ -563,9 +567,6 @@ def _partition_blocks_around_unsafe_content(
     behavior.
     """
 
-    if not _paragraph_has_unsafe_fields(paragraph):
-        return blocks, []
-
     unsafe_ranges = _unsafe_text_ranges(paragraph)
     if unsafe_ranges is None:
         return [], blocks
@@ -579,16 +580,16 @@ def _partition_blocks_around_unsafe_content(
 
 
 def _unsafe_text_ranges(paragraph: Paragraph) -> list[tuple[int, int]] | None:
-    """Return visible character spans controlled by fields or hidden formatting."""
+    """Return visible spans controlled by fields, hyperlinks, or hidden formatting."""
 
-    runs = list(paragraph.runs)
-    if "".join(run.text for run in runs) != paragraph.text:
+    mapped_runs = _paragraph_text_runs(paragraph)
+    if mapped_runs is None:
         return None
 
     ranges: list[tuple[int, int]] = []
     cursor = 0
     field_depth = 0
-    for run in runs:
+    for run, is_hyperlink_run in mapped_runs:
         field_types = [
             marker.get(qn("w:fldCharType"))
             for marker in run._r.findall(qn("w:fldChar"))
@@ -600,12 +601,33 @@ def _unsafe_text_ranges(paragraph: Paragraph) -> list[tuple[int, int]] | None:
         start = cursor
         cursor += len(run.text)
         is_hidden = bool(run._r.xpath(".//w:vanish"))
-        if cursor > start and (field_depth > 0 or is_hidden):
+        if cursor > start and (field_depth > 0 or is_hidden or is_hyperlink_run):
             ranges.append((start, cursor))
 
         field_depth = max(0, field_depth - end_count)
 
     return ranges
+
+
+def _paragraph_text_runs(paragraph: Paragraph) -> list[tuple[Run, bool]] | None:
+    """Map ``paragraph.text`` to contributing runs in exact document order.
+
+    python-docx 1.2.0 defines paragraph text as its direct runs and the runs in
+    direct hyperlinks. ``iter_inner_content()`` is the public traversal that
+    exposes those same elements in order. The boolean records hyperlink
+    membership so callers never edit linked content.
+    """
+
+    mapped_runs: list[tuple[Run, bool]] = []
+    for content in paragraph.iter_inner_content():
+        if isinstance(content, Run):
+            mapped_runs.append((content, False))
+        else:
+            mapped_runs.extend((run, True) for run in content.runs)
+
+    if "".join(run.text for run, _ in mapped_runs) != paragraph.text:
+        return None
+    return mapped_runs
 
 
 def _range_overlaps_any(
@@ -1066,32 +1088,37 @@ def _skipped_identifier_reports(
 
 
 def _replace_paragraph_range(paragraph: Paragraph, start: int, end: int, replacement: str) -> None:
-    runs = list(paragraph.runs)
-    if not runs:
-        paragraph.text = paragraph.text[:start] + replacement + paragraph.text[end:]
-        return
+    mapped_runs = _paragraph_text_runs(paragraph)
+    if mapped_runs is None:
+        raise WordProcessingError(
+            "Could not map paragraph text exactly to Word runs; replacement was not applied."
+        )
 
-    spans: list[tuple[int, int, Any]] = []
+    spans: list[tuple[int, int, Run, bool]] = []
     cursor = 0
-    for run in runs:
+    for run, is_hyperlink_run in mapped_runs:
         run_text = run.text
         run_start = cursor
         run_end = cursor + len(run_text)
-        spans.append((run_start, run_end, run))
+        spans.append((run_start, run_end, run, is_hyperlink_run))
         cursor = run_end
 
     overlapping = [
-        (run_start, run_end, run)
-        for run_start, run_end, run in spans
+        (run_start, run_end, run, is_hyperlink_run)
+        for run_start, run_end, run, is_hyperlink_run in spans
         if run_start < end and run_end > start
     ]
     if not overlapping:
         raise WordProcessingError(
             f"Could not map paragraph replacement range {start}:{end} to Word runs."
         )
+    if any(is_hyperlink_run for _, _, _, is_hyperlink_run in overlapping):
+        raise WordProcessingError(
+            f"Refused to replace paragraph range {start}:{end} inside a hyperlink."
+        )
 
-    first_start, first_end, first_run = overlapping[0]
-    last_start, last_end, last_run = overlapping[-1]
+    first_start, first_end, first_run, _ = overlapping[0]
+    last_start, last_end, last_run, _ = overlapping[-1]
     before = first_run.text[: max(0, start - first_start)]
     after = last_run.text[max(0, end - last_start) :]
 
@@ -1100,7 +1127,7 @@ def _replace_paragraph_range(paragraph: Paragraph, start: int, end: int, replace
         return
 
     first_run.text = before + replacement
-    for _, _, run in overlapping[1:-1]:
+    for _, _, run, _ in overlapping[1:-1]:
         run.text = ""
     last_run.text = after
 

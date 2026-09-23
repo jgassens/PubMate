@@ -45,6 +45,41 @@ def _add_word_field(paragraph, instruction: str, visible_text: str) -> None:
     paragraph.add_run()._r.append(end)
 
 
+def _add_endnote_hyperlink_field(paragraph, visible_text: str) -> None:
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    paragraph.add_run()._r.append(begin)
+
+    instruction_text = OxmlElement("w:instrText")
+    instruction_text.set(qn("xml:space"), "preserve")
+    instruction_text.text = " ADDIN EN.CITE existing-citation "
+    paragraph.add_run()._r.append(instruction_text)
+
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    paragraph.add_run()._r.append(separate)
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("w:anchor"), "_ENREF_1")
+    hyperlink_run = OxmlElement("w:r")
+    hyperlink_text = OxmlElement("w:t")
+    hyperlink_text.text = visible_text
+    hyperlink_run.append(hyperlink_text)
+    hyperlink.append(hyperlink_run)
+    paragraph._p.append(hyperlink)
+
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    paragraph.add_run()._r.append(end)
+
+
+def _endnote_field_xml(paragraph) -> tuple[bytes, ...]:
+    elements = paragraph._p.xpath(
+        "./w:r[w:fldChar or w:instrText] | ./w:hyperlink"
+    )
+    return tuple(element.xml.encode("utf-8") for element in elements)
+
+
 def test_reference_section_heading_detection() -> None:
     triggers = [
         "References",
@@ -157,6 +192,77 @@ def test_replaces_pmids_beside_existing_endnote_field(tmp_path: Path) -> None:
     assert len(output_paragraph._p.xpath(".//w:fldChar")) == 3
     assert len(output_paragraph._p.xpath(".//w:instrText")) == 1
     assert result.warnings == []
+
+
+def test_replaces_pmids_before_and_after_endnote_hyperlink_field(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before (PMID 12345678) ")
+    _add_endnote_hyperlink_field(paragraph, "1")
+    paragraph.add_run(" after (PMID 23456789).")
+    document.save(input_docx)
+
+    input_paragraph = Document(input_docx).paragraphs[0]
+    original_field_xml = _endnote_field_xml(input_paragraph)
+    assert input_paragraph.text == (
+        "Before (PMID 12345678) 1 after (PMID 23456789)."
+    )
+
+    scan = scan_docx(input_docx)
+
+    assert scan.unique_pmids == ["12345678", "23456789"]
+    assert scan.warnings == []
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "12345678": PubMedRecord("12345678", "First", "2024"),
+            "23456789": PubMedRecord("23456789", "Second", "2025"),
+        },
+    )
+
+    output_paragraph = Document(output_docx).paragraphs[0]
+    assert output_paragraph.text == (
+        "Before {First, 2024, PMID-12345678} 1 after "
+        "{Second, 2025, PMID-23456789}."
+    )
+    assert _endnote_field_xml(output_paragraph) == original_field_xml
+    assert result.warnings == []
+
+
+def test_pmid_inside_endnote_hyperlink_field_is_rejected(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    _add_endnote_hyperlink_field(paragraph, "PMID 12345678")
+    paragraph.add_run(" after.")
+    document.save(input_docx)
+
+    original_field_xml = _endnote_field_xml(Document(input_docx).paragraphs[0])
+    scan = scan_docx(input_docx)
+
+    assert scan.unique_pmids == []
+    assert scan.warnings == [
+        "Skipped 1 identifier block overlapping field or hidden text content at "
+        "body paragraph 0."
+    ]
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "12345678": PubMedRecord("12345678", "Unsafe", "2024"),
+        },
+    )
+
+    output_paragraph = Document(output_docx).paragraphs[0]
+    assert output_paragraph.text == "Before PMID 12345678 after."
+    assert _endnote_field_xml(output_paragraph) == original_field_xml
+    assert result.replacements == []
+    assert result.warnings == scan.warnings
 
 
 def test_identifier_inside_existing_word_field_remains_untouched(tmp_path: Path) -> None:
