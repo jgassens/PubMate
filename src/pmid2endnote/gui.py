@@ -324,12 +324,10 @@ class PubMateGUI:
         if sys.platform == "darwin":
             application_menu = tk.Menu(menu_bar, name="apple", tearoff=False)
             application_menu.add_command(label="About PubMate", command=self.show_about)
-            application_menu.add_separator()
-            application_menu.add_command(
-                label="Settings…", accelerator="Command-,", command=self.open_settings
-            )
             menu_bar.add_cascade(menu=application_menu)
-            self.root.bind_all("<Command-comma>", self._settings_event)
+            self.root.createcommand(
+                "::tk::mac::ShowPreferences", lambda: self._settings_event(None)
+            )
             self.root.bind_all("<Command-o>", self._open_event)
         else:
             file_menu.add_separator()

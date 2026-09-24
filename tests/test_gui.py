@@ -248,3 +248,68 @@ def test_open_settings_does_not_stack_dialogs(monkeypatch) -> None:
     assert application.open_settings() is True
     assert nested_results == [False]
     assert application._settings_open is False
+
+
+def test_macos_menu_registers_native_settings_without_duplicate_entry_or_binding(
+    monkeypatch,
+) -> None:
+    class FakeMenu:
+        instances: list["FakeMenu"] = []
+
+        def __init__(self, _parent: object, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.entries: list[tuple[str, dict[str, object]]] = []
+            FakeMenu.instances.append(self)
+
+        def add_command(self, **kwargs: object) -> None:
+            self.entries.append(("command", kwargs))
+
+        def add_separator(self) -> None:
+            self.entries.append(("separator", {}))
+
+        def add_cascade(self, **kwargs: object) -> None:
+            self.entries.append(("cascade", kwargs))
+
+    class FakeRoot:
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, object]] = []
+            self.bindings: list[tuple[str, object]] = []
+            self.configured_menu: object | None = None
+
+        def createcommand(self, name: str, callback: object) -> None:
+            self.commands.append((name, callback))
+
+        def bind_all(self, sequence: str, callback: object) -> None:
+            self.bindings.append((sequence, callback))
+
+        def configure(self, **kwargs: object) -> None:
+            self.configured_menu = kwargs["menu"]
+
+    root = FakeRoot()
+    application = object.__new__(PubMateGUI)
+    application.root = root
+    application.choose_file = lambda: None
+    application.open_conversions_folder = lambda: None
+    application.show_about = lambda: None
+    settings_events: list[object] = []
+    application._settings_event = lambda event: settings_events.append(event) or "break"
+    application._open_event = lambda _event: "break"
+    monkeypatch.setattr(gui.tk, "Menu", FakeMenu)
+    monkeypatch.setattr(gui.sys, "platform", "darwin")
+
+    application._build_menu()
+
+    assert [name for name, _callback in root.commands] == [
+        "::tk::mac::ShowPreferences"
+    ]
+    assert "<Command-comma>" not in [sequence for sequence, _callback in root.bindings]
+    assert [sequence for sequence, _callback in root.bindings] == ["<Command-o>"]
+    assert all(
+        entry[1].get("label") != "Settings…"
+        for menu in FakeMenu.instances
+        for entry in menu.entries
+        if entry[0] == "command"
+    )
+
+    root.commands[0][1]()
+    assert settings_events == [None]
