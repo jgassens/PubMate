@@ -102,6 +102,7 @@ def test_build_script_embeds_sparkle_metadata() -> None:
     assert "macos/PubMateUpdater.m" in text
     assert "Contents/MacOS/PubMateUpdater" in text
     assert "xcrun clang" in text
+    assert "-framework Cocoa" in text
     assert "lipo -create" in text
     assert "PyObjC" not in text
     assert 'TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"' in text
@@ -120,6 +121,37 @@ def test_build_script_embeds_sparkle_metadata() -> None:
     assert '@"SUSkippedMajorSubreleaseVersion"' in helper_text
     assert "[NSUserDefaults standardUserDefaults]" in helper_text
     assert "NSApplicationActivationPolicyProhibited" in helper_text
+    assert "NSApplicationActivationPolicyAccessory" in helper_text
+    assert "[updater checkForUpdates]" in helper_text
+    assert "The run loop keys off visible Sparkle windows instead." in helper_text
+    assert "standardUserDriverDidFinishUpdateSession" not in helper_text
+    assert 'strcmp(argv[1], "--check-now")' in helper_text
+    assert "PubMateBackgroundUpdateTimeout = 30.0 * 60.0" in helper_text
+    assert "PubMateManualUpdateTimeout = 4.0 * 60.0 * 60.0" in helper_text
+    assert "PubMateAbsoluteUpdateTimeout = 12.0 * 60.0 * 60.0" in helper_text
+    assert "static BOOL PubMateHasVisibleSparkleWindow(void)" in helper_text
+    assert (
+        "BOOL hasVisibleSparkleWindow = PubMateHasVisibleSparkleWindow();"
+        in helper_text
+    )
+    assert helper_text.count("if (hasVisibleSparkleWindow)") == 3
+    assert "if ([absoluteDeadline timeIntervalSinceNow] <= 0.0)" in helper_text
+    assert "if ([timeoutDeadline timeIntervalSinceNow] <= 0.0)" in helper_text
+    assert "(updater.sessionInProgress ||" not in helper_text
+    assert "flock(lockFile, LOCK_EX | LOCK_NB)" in helper_text
+    assert "NSApplicationSupportDirectory" in helper_text
+    assert '@"PubMate"' in helper_text
+    assert '@"updater.lock"' in helper_text
+    assert "NSCachesDirectory" not in helper_text
+    assert "unlink(" not in helper_text
+    assert "A PubMate update check is already running. Try again shortly." in helper_text
+    assert (
+        'PubMateShowAlert(\n'
+        '                @"Cannot Check for Updates",\n'
+        '                @"PubMate couldn\'t finish checking for updates. Please try again later."'
+        in helper_text
+    )
+    assert helper_text.count('PubMateShowAlert(') >= 6
     assert text.index('require_macho_archs "$APP_STAGE_PATH"') < text.index(
         '"$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test'
     )

@@ -19,3 +19,8 @@ macos/vendor/
 *.references.nbib
 *.endnote-import.enw
 *.pmid2endnote.report.json
+
+# Test scratch left by agent/pytest runs
+.pytest-tmp/
+pytest-of-*/
+.tmp-zsh/

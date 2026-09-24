@@ -9,12 +9,146 @@ import pmid2endnote.gui as gui
 from pmid2endnote.gui import (
     ClickGate,
     PubMateGUI,
+    SettingsDialog,
     build_processing_options,
     create_root,
     email_validation_error,
     parse_dropped_paths,
     reveal_command,
 )
+
+
+def test_settings_check_for_updates_shows_error_without_closing(monkeypatch) -> None:
+    errors: list[tuple[str, str, object]] = []
+    window = SimpleNamespace(destroy=lambda: pytest.fail("dialog must stay open"))
+    dialog = object.__new__(SettingsDialog)
+    dialog.window = window
+    monkeypatch.setattr(
+        gui.sparkle,
+        "check_for_updates_now",
+        lambda: "Updater helper is unavailable.",
+    )
+    monkeypatch.setattr(
+        gui.messagebox,
+        "showerror",
+        lambda title, message, parent: errors.append((title, message, parent)),
+    )
+
+    dialog._check_for_updates()
+
+    assert errors == [
+        ("Check for Updates", "Updater helper is unavailable.", window)
+    ]
+
+
+def test_settings_check_for_updates_success_has_no_dialog_and_stays_open(
+    monkeypatch,
+) -> None:
+    window = SimpleNamespace(destroy=lambda: pytest.fail("dialog must stay open"))
+    dialog = object.__new__(SettingsDialog)
+    dialog.window = window
+    monkeypatch.setattr(gui.sparkle, "check_for_updates_now", lambda: None)
+    monkeypatch.setattr(
+        gui.messagebox,
+        "showerror",
+        lambda *args, **kwargs: pytest.fail("Sparkle owns the success UI"),
+    )
+
+    dialog._check_for_updates()
+
+
+def test_settings_return_invokes_focused_button() -> None:
+    invoked: list[bool] = []
+    focused_button = SimpleNamespace(
+        winfo_class=lambda: "TButton",
+        invoke=lambda: invoked.append(True),
+    )
+    dialog = object.__new__(SettingsDialog)
+    dialog.window = SimpleNamespace(focus_get=lambda: focused_button)
+    dialog._save = lambda: pytest.fail("focused button should handle Return")
+
+    assert dialog._handle_return(None) == "break"
+    assert invoked == [True]
+
+
+def test_settings_return_saves_when_focus_is_not_a_button() -> None:
+    saves: list[bool] = []
+    focused_entry = SimpleNamespace(winfo_class=lambda: "TEntry")
+    dialog = object.__new__(SettingsDialog)
+    dialog.window = SimpleNamespace(focus_get=lambda: focused_entry)
+    dialog._save = lambda: saves.append(True)
+
+    assert dialog._handle_return(None) == "break"
+    assert saves == [True]
+
+
+def test_settings_return_saves_when_nothing_has_focus() -> None:
+    saves: list[bool] = []
+    dialog = object.__new__(SettingsDialog)
+    dialog.window = SimpleNamespace(focus_get=lambda: None)
+    dialog._save = lambda: saves.append(True)
+
+    assert dialog._handle_return(None) == "break"
+    assert saves == [True]
+
+
+def test_periodic_update_check_runs_and_rearms_after_24_hours(monkeypatch) -> None:
+    after_calls: list[tuple[int, object]] = []
+    update_calls: list[bool] = []
+    application = object.__new__(PubMateGUI)
+    application.root = SimpleNamespace(
+        after=lambda delay, callback: after_calls.append((delay, callback))
+    )
+    application._running = False
+    monkeypatch.setattr(
+        application, "_supports_periodic_update_checks", lambda: True
+    )
+    monkeypatch.setattr(gui.sparkle, "updater_process_is_running", lambda: False)
+    monkeypatch.setattr(
+        gui.sparkle,
+        "initialize_sparkle_updater",
+        lambda: update_calls.append(True) or None,
+    )
+
+    application._schedule_periodic_update_check()
+    assert after_calls == [
+        (application.UPDATE_CHECK_INTERVAL_MS, application._periodic_update_check)
+    ]
+
+    after_calls.pop()[1]()
+    assert update_calls == [True]
+    assert after_calls == [
+        (application.UPDATE_CHECK_INTERVAL_MS, application._periodic_update_check)
+    ]
+
+
+@pytest.mark.parametrize("running,helper_alive", [(True, False), (False, True)])
+def test_periodic_update_check_retries_when_busy_or_helper_alive(
+    monkeypatch, running: bool, helper_alive: bool
+) -> None:
+    after_calls: list[tuple[int, object]] = []
+    application = object.__new__(PubMateGUI)
+    application.root = SimpleNamespace(
+        after=lambda delay, callback: after_calls.append((delay, callback))
+    )
+    application._running = running
+    monkeypatch.setattr(
+        application, "_supports_periodic_update_checks", lambda: True
+    )
+    monkeypatch.setattr(
+        gui.sparkle, "updater_process_is_running", lambda: helper_alive
+    )
+    monkeypatch.setattr(
+        gui.sparkle,
+        "initialize_sparkle_updater",
+        lambda: pytest.fail("a busy app must not launch the helper"),
+    )
+
+    application._periodic_update_check()
+
+    assert after_calls == [
+        (application.UPDATE_CHECK_RETRY_MS, application._periodic_update_check)
+    ]
 
 
 def test_click_gate_requires_matching_press_and_inside_release() -> None:

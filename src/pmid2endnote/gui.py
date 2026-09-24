@@ -33,6 +33,7 @@ else:
     TkinterDnD = None
 
 from pmid2endnote.app import ProcessingOptions, ProcessingResult, process_document
+from pmid2endnote import __version__, sparkle
 from pmid2endnote.conversions import (
     CREATED_MARKER,
     RETENTION_CHOICES,
@@ -244,8 +245,20 @@ class SettingsDialog:
             variable=self.skip_reference_section,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
 
+        updates = ttk.Frame(frame)
+        updates.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        ttk.Label(updates, text=f"PubMate {__version__}").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(
+            updates,
+            text="Check for Updates…",
+            command=self._check_for_updates,
+        ).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        updates.columnconfigure(0, weight=1)
+
         buttons = ttk.Frame(frame)
-        buttons.grid(row=7, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(16, 0))
         ttk.Button(buttons, text="Cancel", command=self._close).grid(
             row=0, column=0, padx=(0, 8)
         )
@@ -253,7 +266,7 @@ class SettingsDialog:
 
         self.window.protocol("WM_DELETE_WINDOW", self._close)
         self.window.bind("<Escape>", lambda _event: self._close())
-        self.window.bind("<Return>", lambda _event: self._save())
+        self.window.bind("<Return>", self._handle_return)
         self.window.grab_set()
         email_entry.focus_set()
         self.window.wait_window()
@@ -264,6 +277,19 @@ class SettingsDialog:
         except tk.TclError:
             pass
         self.window.destroy()
+
+    def _check_for_updates(self) -> None:
+        error = sparkle.check_for_updates_now()
+        if error:
+            messagebox.showerror("Check for Updates", error, parent=self.window)
+
+    def _handle_return(self, _event: object) -> str:
+        focused = self.window.focus_get()
+        if focused is not None and focused.winfo_class() in {"Button", "TButton"}:
+            focused.invoke()
+        else:
+            self._save()
+        return "break"
 
     def _save(self) -> None:
         error = email_validation_error(self.email.get())
@@ -307,6 +333,27 @@ class PubMateGUI:
         self._configure_drop_targets()
         self._clean_old_folders()
         self._poll_queue()
+        self._schedule_periodic_update_check()
+
+    UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
+    UPDATE_CHECK_RETRY_MS = 10 * 60 * 1000
+
+    @staticmethod
+    def _supports_periodic_update_checks() -> bool:
+        return sys.platform == "darwin" and bool(getattr(sys, "frozen", False))
+
+    def _schedule_periodic_update_check(self, delay_ms: int | None = None) -> None:
+        if not self._supports_periodic_update_checks():
+            return
+        delay = self.UPDATE_CHECK_INTERVAL_MS if delay_ms is None else delay_ms
+        self.root.after(delay, self._periodic_update_check)
+
+    def _periodic_update_check(self) -> None:
+        if self._running or sparkle.updater_process_is_running():
+            self._schedule_periodic_update_check(self.UPDATE_CHECK_RETRY_MS)
+            return
+        sparkle.initialize_sparkle_updater()
+        self._schedule_periodic_update_check()
 
     def _build_menu(self) -> None:
         menu_bar = tk.Menu(self.root)
@@ -615,8 +662,6 @@ class PubMateGUI:
             self._click_gate.settings_closed()
 
     def show_about(self) -> None:
-        from pmid2endnote import __version__
-
         messagebox.showinfo(
             "About PubMate",
             f"PubMate {__version__}\n\nConvert Word PMID/DOI placeholders for EndNote.",
