@@ -3,8 +3,11 @@ import queue
 import tkinter
 from types import SimpleNamespace
 
+import pytest
+
 import pmid2endnote.gui as gui
 from pmid2endnote.gui import (
+    ClickGate,
     PubMateGUI,
     build_processing_options,
     create_root,
@@ -12,6 +15,32 @@ from pmid2endnote.gui import (
     parse_dropped_paths,
     reveal_command,
 )
+
+
+def test_click_gate_requires_matching_press_and_inside_release() -> None:
+    gate = ClickGate()
+
+    assert gate.release(inside=True) is False
+    gate.press()
+    assert gate.release(inside=False) is False
+    assert gate.release(inside=True) is False
+    gate.press()
+    assert gate.release(inside=True) is True
+
+
+def test_click_gate_suppresses_chooser_during_and_after_settings() -> None:
+    now = [10.0]
+    gate = ClickGate(clock=lambda: now[0])
+
+    assert gate.should_open() is True
+    gate.settings_opened()
+    assert gate.should_open() is False
+    gate.settings_closed()
+    assert gate.should_open() is False
+    now[0] += 0.399
+    assert gate.should_open() is False
+    now[0] += 0.001
+    assert gate.should_open() is True
 
 
 def test_parse_dropped_paths_handles_braces_and_spaces_without_tk_window() -> None:
@@ -118,11 +147,95 @@ def test_poll_queue_rearms_after_handler_error() -> None:
     assert after_calls == [(100, application._poll_queue)]
 
 
+def test_open_event_defers_native_file_chooser(monkeypatch) -> None:
+    idle_callbacks: list[object] = []
+    chooser_calls: list[dict[str, object]] = []
+    application = object.__new__(PubMateGUI)
+    application.root = SimpleNamespace(
+        after_idle=lambda callback: idle_callbacks.append(callback)
+    )
+    application._running = False
+    application._chooser_pending = False
+    application._click_gate = ClickGate()
+    monkeypatch.setattr(
+        gui.filedialog,
+        "askopenfilename",
+        lambda **kwargs: chooser_calls.append(kwargs) or "",
+    )
+
+    assert application._open_event(object()) == "break"
+    assert chooser_calls == []
+    assert idle_callbacks == [application._show_file_chooser]
+
+    idle_callbacks[0]()
+    assert len(chooser_calls) == 1
+
+
+def test_chooser_pending_resets_after_idle_scheduling_or_callback_failure(monkeypatch) -> None:
+    idle_callbacks: list[object] = []
+    attempts = 0
+
+    def after_idle(callback: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("cannot schedule")
+        idle_callbacks.append(callback)
+
+    application = object.__new__(PubMateGUI)
+    application.root = SimpleNamespace(after_idle=after_idle)
+    application._running = False
+    application._chooser_pending = False
+    application._click_gate = ClickGate()
+
+    with pytest.raises(RuntimeError, match="cannot schedule"):
+        application.choose_file()
+    assert application._chooser_pending is False
+
+    application.choose_file()
+    assert idle_callbacks == [application._show_file_chooser]
+
+    monkeypatch.setattr(
+        gui.filedialog,
+        "askopenfilename",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("chooser failed")),
+    )
+    with pytest.raises(RuntimeError, match="chooser failed"):
+        idle_callbacks[0]()
+    assert application._chooser_pending is False
+
+
+def test_drop_release_without_press_does_not_schedule_chooser() -> None:
+    idle_callbacks: list[object] = []
+    application = object.__new__(PubMateGUI)
+    application.root = SimpleNamespace(
+        after_idle=lambda callback: idle_callbacks.append(callback)
+    )
+    application.drop_zone = SimpleNamespace(
+        winfo_rootx=lambda: 10,
+        winfo_rooty=lambda: 20,
+        winfo_width=lambda: 100,
+        winfo_height=lambda: 50,
+    )
+    application._running = False
+    application._chooser_pending = False
+    application._click_gate = ClickGate()
+    event = SimpleNamespace(x_root=30, y_root=40)
+
+    assert application._choose_event(event) == "break"
+    assert idle_callbacks == []
+
+    application._drop_press_event(event)
+    application._choose_event(event)
+    assert idle_callbacks == [application._show_file_chooser]
+
+
 def test_open_settings_does_not_stack_dialogs(monkeypatch) -> None:
     application = object.__new__(PubMateGUI)
     application.root = object()
     application._running = False
     application._settings_open = False
+    application._click_gate = ClickGate()
     nested_results: list[bool] = []
 
     class FakeSettingsDialog:

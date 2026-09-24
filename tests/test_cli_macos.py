@@ -1,7 +1,52 @@
 from pathlib import Path
 
 from pmid2endnote import cli
+from pmid2endnote import macos_launcher
 from pmid2endnote.app import ProcessingResult
+
+
+def test_frozen_macos_launcher_replaces_non_tty_stdin_for_tk(monkeypatch) -> None:
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(macos_launcher.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_launcher.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(macos_launcher.os, "isatty", lambda fd: False)
+    monkeypatch.setattr(macos_launcher.os, "pipe", lambda: (11, 12))
+    monkeypatch.setattr(
+        macos_launcher.os, "dup2", lambda source, target: calls.append(("dup2", source, target))
+    )
+    monkeypatch.setattr(
+        macos_launcher.os, "close", lambda fd: calls.append(("close", fd))
+    )
+    monkeypatch.setenv("TK_CONSOLE", "1")
+
+    assert macos_launcher._disable_tk_console_for_frozen_macos() is True
+    assert calls == [("dup2", 11, 0), ("close", 11), ("close", 12)]
+    assert "TK_CONSOLE" not in macos_launcher.os.environ
+
+
+def test_frozen_macos_launcher_ignores_pipe_failure(monkeypatch) -> None:
+    monkeypatch.setattr(macos_launcher.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_launcher.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(macos_launcher.os, "isatty", lambda _fd: False)
+    monkeypatch.setattr(
+        macos_launcher.os,
+        "pipe",
+        lambda: (_ for _ in ()).throw(OSError("pipe unavailable")),
+    )
+
+    assert macos_launcher._disable_tk_console_for_frozen_macos() is False
+
+
+def test_tk_stdin_guard_does_not_change_cli_process(monkeypatch) -> None:
+    monkeypatch.setattr(macos_launcher.sys, "platform", "darwin")
+    monkeypatch.delattr(macos_launcher.sys, "frozen", raising=False)
+    monkeypatch.setattr(
+        macos_launcher.os,
+        "isatty",
+        lambda _fd: (_ for _ in ()).throw(AssertionError("must not inspect CLI stdin")),
+    )
+
+    assert macos_launcher._disable_tk_console_for_frozen_macos() is False
 
 
 def test_cli_help_includes_parenthetical_flag() -> None:

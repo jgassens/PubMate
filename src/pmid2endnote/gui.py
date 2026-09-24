@@ -9,6 +9,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from typing import Callable
 
 try:
@@ -132,6 +133,45 @@ def create_root() -> tuple[object, bool]:
     return tk.Tk(), False
 
 
+class ClickGate:
+    """Track complete drop-zone clicks and the settings-dialog cooldown."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        cooldown_seconds: float = 0.4,
+    ) -> None:
+        self._clock = clock
+        self._cooldown_seconds = cooldown_seconds
+        self._pressed = False
+        self._settings_open = False
+        self._settings_closed_at: float | None = None
+
+    def press(self) -> None:
+        self._pressed = True
+
+    def release(self, *, inside: bool) -> bool:
+        matched_press = self._pressed
+        self._pressed = False
+        return matched_press and inside
+
+    def settings_opened(self) -> None:
+        self._pressed = False
+        self._settings_open = True
+
+    def settings_closed(self) -> None:
+        self._settings_open = False
+        self._settings_closed_at = self._clock()
+
+    def should_open(self) -> bool:
+        if self._settings_open:
+            return False
+        if self._settings_closed_at is None:
+            return True
+        return self._clock() - self._settings_closed_at >= self._cooldown_seconds
+
+
 class SettingsDialog:
     """Modal editor for PubMate's persistent GUI settings."""
 
@@ -206,17 +246,24 @@ class SettingsDialog:
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=7, column=0, columnspan=2, sticky="e", pady=(16, 0))
-        ttk.Button(buttons, text="Cancel", command=self.window.destroy).grid(
+        ttk.Button(buttons, text="Cancel", command=self._close).grid(
             row=0, column=0, padx=(0, 8)
         )
         ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
 
-        self.window.protocol("WM_DELETE_WINDOW", self.window.destroy)
-        self.window.bind("<Escape>", lambda _event: self.window.destroy())
+        self.window.protocol("WM_DELETE_WINDOW", self._close)
+        self.window.bind("<Escape>", lambda _event: self._close())
         self.window.bind("<Return>", lambda _event: self._save())
         self.window.grab_set()
         email_entry.focus_set()
         self.window.wait_window()
+
+    def _close(self) -> None:
+        try:
+            self.window.grab_release()
+        except tk.TclError:
+            pass
+        self.window.destroy()
 
     def _save(self) -> None:
         error = email_validation_error(self.email.get())
@@ -235,7 +282,7 @@ class SettingsDialog:
             }
         )
         self.saved = True
-        self.window.destroy()
+        self._close()
 
 
 class PubMateGUI:
@@ -250,6 +297,8 @@ class PubMateGUI:
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._running = False
         self._settings_open = False
+        self._click_gate = ClickGate()
+        self._chooser_pending = False
         self._dnd_available = dnd_available
         self._drop_widgets: list[object] = []
 
@@ -333,7 +382,8 @@ class PubMateGUI:
         secondary.grid(row=2, column=0, padx=24, pady=(0, 24))
         self._drop_widgets = [self.drop_zone, primary, secondary]
         for widget in self._drop_widgets:
-            widget.bind("<Button-1>", self._choose_event)
+            widget.bind("<ButtonPress-1>", self._drop_press_event)
+            widget.bind("<ButtonRelease-1>", self._choose_event)
 
         ttk.Label(main, textvariable=self.status, anchor="w").grid(
             row=1, column=0, sticky="ew", pady=(12, 6)
@@ -360,8 +410,13 @@ class PubMateGUI:
         self.start_conversion(paths[0])
         return "break"
 
-    def _choose_event(self, _event: object) -> str:
-        self.choose_file()
+    def _drop_press_event(self, _event: object) -> str:
+        self._click_gate.press()
+        return "break"
+
+    def _choose_event(self, event: object) -> str:
+        if self._click_gate.release(inside=self._release_inside_drop_zone(event)):
+            self.choose_file()
         return "break"
 
     def _open_event(self, _event: object) -> str:
@@ -373,15 +428,38 @@ class PubMateGUI:
         return "break"
 
     def choose_file(self) -> None:
-        if self._running:
+        """Request the native chooser from a later main-loop iteration."""
+
+        if self._running or self._chooser_pending or not self._click_gate.should_open():
             return
-        filename = filedialog.askopenfilename(
-            parent=self.root,
-            title="Choose Word document",
-            filetypes=[("Word documents", "*.docx"), ("All files", "*.*")],
+        self._chooser_pending = True
+        try:
+            self.root.after_idle(self._show_file_chooser)
+        except Exception:
+            self._chooser_pending = False
+            raise
+
+    def _show_file_chooser(self) -> None:
+        try:
+            if self._running or not self._click_gate.should_open():
+                return
+            filename = filedialog.askopenfilename(
+                parent=self.root,
+                title="Choose Word document",
+                filetypes=[("Word documents", "*.docx"), ("All files", "*.*")],
+            )
+            if filename:
+                self.start_conversion(Path(filename))
+        finally:
+            self._chooser_pending = False
+
+    def _release_inside_drop_zone(self, event: object) -> bool:
+        left = self.drop_zone.winfo_rootx()
+        top = self.drop_zone.winfo_rooty()
+        return (
+            left <= event.x_root < left + self.drop_zone.winfo_width()
+            and top <= event.y_root < top + self.drop_zone.winfo_height()
         )
-        if filename:
-            self.start_conversion(Path(filename))
 
     def start_conversion(self, input_docx: Path) -> None:
         if self._running:
@@ -530,11 +608,13 @@ class PubMateGUI:
         if self._running or self._settings_open:
             return False
         self._settings_open = True
+        self._click_gate.settings_opened()
         try:
             dialog = SettingsDialog(self.root)
             return dialog.saved
         finally:
             self._settings_open = False
+            self._click_gate.settings_closed()
 
     def show_about(self) -> None:
         from pmid2endnote import __version__
