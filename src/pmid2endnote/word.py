@@ -41,6 +41,7 @@ class TextRange(Protocol):
 
 
 TextRangeT = TypeVar("TextRangeT", bound=TextRange)
+FieldDepthCache = dict[Any, dict[Any, int]]
 
 REFERENCE_SECTION_HEADINGS = {
     "references",
@@ -225,6 +226,7 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
     occurrences: list[DocumentPmidOccurrence] = []
     skipped_identifiers: list[dict[str, Any]] = []
     context = _reference_section_context(document, options)
+    field_depth_cache: FieldDepthCache = {}
 
     for item in context.paragraphs:
         paragraph = item.paragraph
@@ -242,12 +244,39 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
                 _skipped_identifier_reports(blocks, location, reason="reference_section")
             )
             continue
-        blocks, unsafe_blocks = _partition_blocks_around_unsafe_content(paragraph, blocks)
-        if unsafe_blocks:
+        replacement_blocks = _replacement_blocks_for_text(
+            paragraph.text,
+            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
+            scan_dois=options.scan_dois,
+            scan_bare_dois=options.scan_bare_dois,
+        )
+        (
+            replacement_blocks,
+            field_or_hidden_blocks,
+            tracked_change_blocks,
+            non_text_blocks,
+        ) = _partition_blocks_around_unsafe_content(
+            paragraph,
+            replacement_blocks,
+            field_depth_cache,
+        )
+        if field_or_hidden_blocks:
             warnings.append(
-                _unsafe_content_warning(location, len(unsafe_blocks))
+                _unsafe_content_warning(location, len(field_or_hidden_blocks))
             )
-        occurrences.extend(DocumentPmidOccurrence(block=block, location=location) for block in blocks)
+        if non_text_blocks:
+            warnings.append(
+                _non_text_content_warning(location, len(non_text_blocks))
+            )
+        if tracked_change_blocks:
+            warnings.append(
+                _tracked_change_warning(location, len(tracked_change_blocks))
+            )
+        occurrences.extend(
+            DocumentPmidOccurrence(block=block, location=location)
+            for replacement_block in replacement_blocks
+            for block in replacement_block.blocks
+        )
 
     if options.include_comments:
         for paragraph, location in _iter_comment_paragraphs(document, options):
@@ -264,13 +293,35 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
                     _skipped_identifier_reports(blocks, location, reason="reference_section")
                 )
                 continue
-            blocks, unsafe_blocks = _partition_blocks_around_unsafe_content(paragraph, blocks)
-            if unsafe_blocks:
+            replacement_blocks = _replacement_blocks_for_text(
+                paragraph.text,
+                scan_parenthetical_pmids=options.scan_parenthetical_pmids,
+                scan_dois=options.scan_dois,
+                scan_bare_dois=options.scan_bare_dois,
+            )
+            (
+                replacement_blocks,
+                field_or_hidden_blocks,
+                tracked_change_blocks,
+                _,
+            ) = _partition_blocks_around_unsafe_content(
+                paragraph,
+                replacement_blocks,
+                field_depth_cache,
+                check_run_editability=False,
+            )
+            if field_or_hidden_blocks:
                 warnings.append(
-                    _unsafe_content_warning(location, len(unsafe_blocks))
+                    _unsafe_content_warning(location, len(field_or_hidden_blocks))
+                )
+            if tracked_change_blocks:
+                warnings.append(
+                    _tracked_change_warning(location, len(tracked_change_blocks))
                 )
             occurrences.extend(
-                DocumentPmidOccurrence(block=block, location=location) for block in blocks
+                DocumentPmidOccurrence(block=block, location=location)
+                for replacement_block in replacement_blocks
+                for block in replacement_block.blocks
             )
 
     for paragraph, location in _iter_header_footer_paragraphs(document, options):
@@ -282,12 +333,39 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
         )
         if not blocks:
             continue
-        blocks, unsafe_blocks = _partition_blocks_around_unsafe_content(paragraph, blocks)
-        if unsafe_blocks:
+        replacement_blocks = _replacement_blocks_for_text(
+            paragraph.text,
+            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
+            scan_dois=options.scan_dois,
+            scan_bare_dois=options.scan_bare_dois,
+        )
+        (
+            replacement_blocks,
+            field_or_hidden_blocks,
+            tracked_change_blocks,
+            non_text_blocks,
+        ) = _partition_blocks_around_unsafe_content(
+            paragraph,
+            replacement_blocks,
+            field_depth_cache,
+        )
+        if field_or_hidden_blocks:
             warnings.append(
-                _unsafe_content_warning(location, len(unsafe_blocks))
+                _unsafe_content_warning(location, len(field_or_hidden_blocks))
             )
-        occurrences.extend(DocumentPmidOccurrence(block=block, location=location) for block in blocks)
+        if non_text_blocks:
+            warnings.append(
+                _non_text_content_warning(location, len(non_text_blocks))
+            )
+        if tracked_change_blocks:
+            warnings.append(
+                _tracked_change_warning(location, len(tracked_change_blocks))
+            )
+        occurrences.extend(
+            DocumentPmidOccurrence(block=block, location=location)
+            for replacement_block in replacement_blocks
+            for block in replacement_block.blocks
+        )
 
     if skipped_identifiers:
         warnings.append(
@@ -333,6 +411,7 @@ def replace_pmids_in_docx(
     warnings: list[str] = []
     replacements: list[dict[str, Any]] = []
     context = _reference_section_context(document, options)
+    field_depth_cache: FieldDepthCache = {}
 
     for item in context.paragraphs:
         if item.skipped_by_reference_section:
@@ -347,6 +426,7 @@ def replace_pmids_in_docx(
             scan_parenthetical_pmids=options.scan_parenthetical_pmids,
             scan_dois=options.scan_dois,
             scan_bare_dois=options.scan_bare_dois,
+            field_depth_cache=field_depth_cache,
         )
         replacements.extend(paragraph_replacements)
         warnings.extend(paragraph_warnings)
@@ -357,6 +437,7 @@ def replace_pmids_in_docx(
             options=options,
             records_by_identifier=resolved_records,
             context=context,
+            field_depth_cache=field_depth_cache,
         )
         replacements.extend(comment_replacements)
         warnings.extend(comment_warnings)
@@ -372,6 +453,7 @@ def replace_pmids_in_docx(
             scan_parenthetical_pmids=options.scan_parenthetical_pmids,
             scan_dois=options.scan_dois,
             scan_bare_dois=options.scan_bare_dois,
+            field_depth_cache=field_depth_cache,
         )
         replacements.extend(paragraph_replacements)
         warnings.extend(paragraph_warnings)
@@ -546,18 +628,13 @@ def _iter_comment_paragraphs(
                     comment_index += 1
 
 
-def _paragraph_has_unsafe_fields(paragraph: Paragraph) -> bool:
-    xml = paragraph._p.xml
-    return any(
-        marker in xml
-        for marker in ("w:fldChar", "w:instrText", "w:vanish", "w:hyperlink")
-    )
-
-
 def _partition_blocks_around_unsafe_content(
     paragraph: Paragraph,
     blocks: list[TextRangeT],
-) -> tuple[list[TextRangeT], list[TextRangeT]]:
+    field_depth_cache: FieldDepthCache,
+    *,
+    check_run_editability: bool = True,
+) -> tuple[list[TextRangeT], list[TextRangeT], list[TextRangeT], list[TextRangeT]]:
     """Keep blocks outside Word fields/hidden runs and reject overlapping blocks.
 
     Word and EndNote fields may safely coexist elsewhere in a paragraph. The
@@ -567,32 +644,70 @@ def _partition_blocks_around_unsafe_content(
     behavior.
     """
 
-    unsafe_ranges = _unsafe_text_ranges(paragraph)
-    if unsafe_ranges is None:
-        return [], blocks
-
-    safe: list[TextRangeT] = []
-    unsafe: list[TextRangeT] = []
-    for block in blocks:
-        target = unsafe if _range_overlaps_any(block.start, block.end, unsafe_ranges) else safe
-        target.append(block)
-    return safe, unsafe
-
-
-def _unsafe_text_ranges(paragraph: Paragraph) -> list[tuple[int, int]] | None:
-    """Return visible spans controlled by fields, hyperlinks, or hidden formatting."""
-
     mapped_runs = _paragraph_text_runs(paragraph)
     if mapped_runs is None:
+        return [], blocks, [], []
+
+    unsafe_ranges = _unsafe_text_ranges(paragraph, field_depth_cache, mapped_runs)
+    if unsafe_ranges is None:
+        return [], blocks, [], []
+
+    safe: list[TextRangeT] = []
+    field_or_hidden: list[TextRangeT] = []
+    tracked_changes: list[TextRangeT] = []
+    non_text: list[TextRangeT] = []
+    for block in blocks:
+        if _range_overlaps_any(block.start, block.end, unsafe_ranges):
+            field_or_hidden.append(block)
+        elif _identifier_touches_omitted_content(
+            paragraph,
+            mapped_runs,
+            block.start,
+            block.end,
+        ):
+            tracked_changes.append(block)
+        elif not check_run_editability:
+            safe.append(block)
+        elif _mapped_runs_interrupted(mapped_runs, block.start, block.end):
+            tracked_changes.append(block)
+        elif _mapped_runs_can_replace_range(mapped_runs, block.start, block.end):
+            safe.append(block)
+        else:
+            non_text.append(block)
+    return safe, field_or_hidden, tracked_changes, non_text
+
+
+def _unsafe_text_ranges(
+    paragraph: Paragraph,
+    field_depth_cache: FieldDepthCache,
+    mapped_runs: list[tuple[Run, bool]],
+) -> list[tuple[int, int]] | None:
+    """Return visible spans controlled by fields, hyperlinks, or hidden formatting."""
+
+    mapped_field_markers = {
+        marker
+        for run, _ in mapped_runs
+        for marker in _iter_story_elements(run._r)
+        if marker.tag == qn("w:fldChar")
+    }
+    paragraph_field_markers = [
+        element
+        for element in _iter_story_elements(paragraph._p)
+        if element.tag == qn("w:fldChar")
+    ]
+    if any(marker not in mapped_field_markers for marker in paragraph_field_markers):
+        # A marker inside tracked changes, structured content, or another
+        # wrapper omitted from paragraph.text has no reliable text offset.
         return None
 
     ranges: list[tuple[int, int]] = []
     cursor = 0
-    field_depth = 0
+    field_depth = _field_depth_at_paragraph_start(paragraph, field_depth_cache)
     for run, is_hyperlink_run in mapped_runs:
         field_types = [
             marker.get(qn("w:fldCharType"))
-            for marker in run._r.findall(qn("w:fldChar"))
+            for marker in _iter_story_elements(run._r)
+            if marker.tag == qn("w:fldChar")
         ]
         begin_count = field_types.count("begin")
         end_count = field_types.count("end")
@@ -607,6 +722,69 @@ def _unsafe_text_ranges(paragraph: Paragraph) -> list[tuple[int, int]] | None:
         field_depth = max(0, field_depth - end_count)
 
     return ranges
+
+
+def _field_depth_at_paragraph_start(
+    paragraph: Paragraph,
+    field_depth_cache: FieldDepthCache,
+) -> int:
+    """Return complex-field depth where *paragraph* starts in its Word story."""
+
+    story_root = _paragraph_story_root(paragraph)
+    depths = field_depth_cache.get(story_root)
+    if depths is None:
+        depths = _story_field_depths(story_root)
+        field_depth_cache[story_root] = depths
+    return depths.get(paragraph._p, 0)
+
+
+def _paragraph_story_root(paragraph: Paragraph) -> Any:
+    """Return the root of the Word story containing *paragraph*."""
+
+    comment_tag = qn("w:comment")
+    for ancestor in paragraph._p.iterancestors():
+        if ancestor.tag == comment_tag:
+            return ancestor
+    return paragraph._p.getroottree().getroot()
+
+
+def _story_field_depths(story_root: Any) -> dict[Any, int]:
+    """Map each paragraph element in a story to its starting field depth."""
+
+    paragraph_tag = qn("w:p")
+    field_char_tag = qn("w:fldChar")
+    field_char_type_attr = qn("w:fldCharType")
+    field_depth = 0
+    depths: dict[Any, int] = {}
+    for element in _iter_story_elements(story_root):
+        if element.tag == paragraph_tag:
+            depths[element] = field_depth
+        elif element.tag == field_char_tag:
+            field_type = element.get(field_char_type_attr)
+            if field_type == "begin":
+                field_depth += 1
+            elif field_type == "end":
+                field_depth = max(0, field_depth - 1)
+    return depths
+
+
+def _iter_story_elements(story_root: Any) -> Iterator[Any]:
+    """Yield story XML in order without entering nested or fallback stories."""
+
+    nested_story_tag = qn("w:txbxContent")
+    fallback_tag = (
+        "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+    )
+    elements = [story_root]
+    while elements:
+        element = elements.pop()
+        yield element
+        children = [
+            child
+            for child in element.iterchildren()
+            if child.tag not in {nested_story_tag, fallback_tag}
+        ]
+        elements.extend(reversed(children))
 
 
 def _paragraph_text_runs(paragraph: Paragraph) -> list[tuple[Run, bool]] | None:
@@ -630,6 +808,212 @@ def _paragraph_text_runs(paragraph: Paragraph) -> list[tuple[Run, bool]] | None:
     return mapped_runs
 
 
+def _mapped_runs_can_replace_range(
+    mapped_runs: list[tuple[Run, bool]],
+    start: int,
+    end: int,
+) -> bool:
+    """Return whether a range maps only to safely editable Word runs."""
+
+    if start >= end:
+        return False
+
+    cursor = 0
+    found_overlap = False
+    for run, is_hyperlink_run in mapped_runs:
+        run_start = cursor
+        run_end = cursor + len(run.text)
+        cursor = run_end
+        if run_start == run_end or run_start >= end or run_end <= start:
+            continue
+        if is_hyperlink_run or not _run_has_only_safe_children(run):
+            return False
+        found_overlap = True
+    return found_overlap
+
+
+def _mapped_runs_interrupted(
+    mapped_runs: list[tuple[Run, bool]],
+    start: int,
+    end: int,
+) -> bool:
+    """Return whether editing a text range would cross unsafe Word XML."""
+
+    overlapping: list[Run] = []
+    cursor = 0
+    for run, _ in mapped_runs:
+        run_start = cursor
+        run_end = cursor + len(run.text)
+        cursor = run_end
+        if run_start < run_end and run_start < end and run_end > start:
+            overlapping.append(run)
+
+    if len(overlapping) < 2:
+        return False
+
+    parent = overlapping[0]._r.getparent()
+    if parent is None or any(run._r.getparent() is not parent for run in overlapping[1:]):
+        return True
+
+    indexes = [parent.index(run._r) for run in overlapping]
+    for left, right in zip(indexes, indexes[1:]):
+        for element in parent[left + 1 : right]:
+            if not _element_is_harmless_between_runs(element):
+                return True
+    return False
+
+
+_HARMLESS_PARAGRAPH_MARKERS = frozenset(
+    qn(f"w:{local_name}")
+    for local_name in (
+        "proofErr",
+        "bookmarkStart",
+        "bookmarkEnd",
+        "commentRangeStart",
+        "commentRangeEnd",
+        "permStart",
+        "permEnd",
+    )
+)
+
+_OMITTED_CONTENT_CONTAINERS = frozenset(
+    qn(f"w:{local_name}")
+    for local_name in (
+        "ins",
+        "del",
+        "moveFrom",
+        "moveTo",
+        "sdt",
+        "smartTag",
+        "customXml",
+        "fldSimple",
+    )
+)
+
+_UNSAFE_RANGE_MARKERS = frozenset(
+    qn(f"w:{local_name}")
+    for local_name in (
+        "moveFromRangeStart",
+        "moveFromRangeEnd",
+        "moveToRangeStart",
+        "moveToRangeEnd",
+    )
+)
+
+
+def _element_is_harmless_between_runs(element: Any) -> bool:
+    """Return whether an omitted sibling can remain between edited runs."""
+
+    if element.tag in _HARMLESS_PARAGRAPH_MARKERS:
+        return True
+    if element.tag in _OMITTED_CONTENT_CONTAINERS | _UNSAFE_RANGE_MARKERS:
+        return False
+    if element.tag == qn("w:r"):
+        return not _run_element_text(element) and _run_element_has_only_safe_children(
+            element
+        )
+    return not _element_has_content(element)
+
+
+def _identifier_touches_omitted_content(
+    paragraph: Paragraph,
+    mapped_runs: list[tuple[Run, bool]],
+    start: int,
+    end: int,
+) -> bool:
+    """Return whether omitted content is within or directly beside an identifier.
+
+    ``paragraph.text`` excludes tracked insertions/deletions and content-control
+    wrappers. Their boundary offset is still knowable from the surrounding
+    mapped runs, so content at offsets from ``start`` through ``end`` may be
+    part of the identifier that the visible text appears to contain.
+    """
+
+    children = list(paragraph._p)
+    child_indexes = {child: index for index, child in enumerate(children)}
+    visible_lengths = [0] * len(children)
+    for run, _ in mapped_runs:
+        top_level = _top_level_paragraph_child(paragraph, run._r)
+        if top_level is None:
+            return True
+        visible_lengths[child_indexes[top_level]] += len(run.text)
+
+    boundary = 0
+    for child, visible_length in zip(children, visible_lengths):
+        if (
+            child.tag in _OMITTED_CONTENT_CONTAINERS
+            and _element_has_content(child)
+            and start <= boundary <= end
+        ):
+            return True
+        boundary += visible_length
+    return False
+
+
+def _top_level_paragraph_child(paragraph: Paragraph, element: Any) -> Any | None:
+    child = element
+    while child.getparent() is not paragraph._p:
+        child = child.getparent()
+        if child is None:
+            return None
+    return child
+
+
+def _element_has_content(element: Any) -> bool:
+    """Return whether an omitted element contains text or non-text run content."""
+
+    return any(
+        _run_element_text(run)
+        or any(
+            child.tag not in {qn("w:rPr"), qn("w:t"), qn("w:lastRenderedPageBreak")}
+            for child in run
+        )
+        for run in element.iter(qn("w:r"))
+    )
+
+
+def _run_element_text(run_element: Any) -> str:
+    return "".join(
+        text.text or ""
+        for text in run_element.iter()
+        if text.tag in {qn("w:t"), qn("w:delText"), qn("w:instrText")}
+    )
+
+
+_SAFE_EDITABLE_RUN_CHILDREN = frozenset(
+    qn(f"w:{local_name}")
+    for local_name in (
+        "rPr",
+        "t",
+        "tab",
+        "lastRenderedPageBreak",
+    )
+)
+
+
+def _run_has_only_safe_children(run: Run) -> bool:
+    """Return whether assigning ``run.text`` cannot remove protected content."""
+
+    return _run_element_has_only_safe_children(run._r)
+
+
+def _run_element_has_only_safe_children(run_element: Any) -> bool:
+    """Return whether a run element contains only children preserved as text."""
+
+    break_tag = qn("w:br")
+    break_type_attr = qn("w:type")
+    break_clear_attr = qn("w:clear")
+    return all(
+        child.tag in _SAFE_EDITABLE_RUN_CHILDREN
+        or (
+            child.tag == break_tag
+            and child.get(break_type_attr) in (None, "textWrapping")
+            and child.get(break_clear_attr) is None
+        )
+        for child in run_element
+    )
+
+
 def _range_overlaps_any(
     start: int,
     end: int,
@@ -646,6 +1030,24 @@ def _unsafe_content_warning(location: TextLocation, count: int) -> str:
     )
 
 
+def _non_text_content_warning(location: TextLocation, count: int) -> str:
+    label = "identifier block" if count == 1 else "identifier blocks"
+    return (
+        f"Skipped {count} {label} sharing a Word run with non-text content "
+        f"(image, text box, page break, etc.) at {location.part} paragraph "
+        f"{location.paragraph_index}."
+    )
+
+
+def _tracked_change_warning(location: TextLocation, count: int) -> str:
+    label = "identifier block" if count == 1 else "identifier blocks"
+    return (
+        f"Skipped {count} {label} next to tracked changes or content controls "
+        f"that may alter the identifier at "
+        f"{location.part} paragraph {location.paragraph_index}."
+    )
+
+
 def _replace_paragraph_blocks(
     *,
     paragraph: Paragraph,
@@ -657,6 +1059,7 @@ def _replace_paragraph_blocks(
     scan_parenthetical_pmids: bool,
     scan_dois: bool,
     scan_bare_dois: bool,
+    field_depth_cache: FieldDepthCache,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     text = paragraph.text
     blocks = scan_text(
@@ -674,17 +1077,27 @@ def _replace_paragraph_blocks(
         scan_dois=scan_dois,
         scan_bare_dois=scan_bare_dois,
     )
-    replacement_blocks, unsafe_blocks = _partition_blocks_around_unsafe_content(
+    (
+        replacement_blocks,
+        field_or_hidden_blocks,
+        tracked_change_blocks,
+        non_text_blocks,
+    ) = _partition_blocks_around_unsafe_content(
         paragraph,
         replacement_blocks,
+        field_depth_cache,
     )
-    planned: list[tuple[ReplacementBlock, str]] = []
+    planned: list[tuple[ReplacementBlock, str, dict[str, Any]]] = []
     report_replacements: list[dict[str, Any]] = []
     warnings = (
-        [_unsafe_content_warning(location, len(unsafe_blocks))]
-        if unsafe_blocks
+        [_unsafe_content_warning(location, len(field_or_hidden_blocks))]
+        if field_or_hidden_blocks
         else []
     )
+    if non_text_blocks:
+        warnings.append(_non_text_content_warning(location, len(non_text_blocks)))
+    if tracked_change_blocks:
+        warnings.append(_tracked_change_warning(location, len(tracked_change_blocks)))
 
     for block in replacement_blocks:
         replacement_text = _replacement_for_block(
@@ -700,23 +1113,43 @@ def _replace_paragraph_blocks(
                 f"{location.paragraph_index}: {block.original_text}"
             )
             continue
-        planned.append((block, replacement_text))
-        report_replacements.append(
-            {
-                "original_text": block.original_text,
-                "replacement_text": replacement_text,
-                "pmids": list(block.pmids),
-                "dois": list(block.dois),
-                "identifiers": _block_identifier_report(block),
-                "kind": block.kind,
-                "source": block.source,
-                "location": location.as_report_dict(),
-            }
-        )
+        report = {
+            "original_text": block.original_text,
+            "replacement_text": replacement_text,
+            "pmids": list(block.pmids),
+            "dois": list(block.dois),
+            "identifiers": _block_identifier_report(block),
+            "kind": block.kind,
+            "source": block.source,
+            "location": location.as_report_dict(),
+        }
+        planned.append((block, replacement_text, report))
+        if dry_run:
+            report_replacements.append(report)
 
     if not dry_run:
-        for block, replacement_text in sorted(planned, key=lambda item: item[0].start, reverse=True):
-            _replace_paragraph_range(paragraph, block.start, block.end, replacement_text)
+        applied_reports: list[dict[str, Any]] = []
+        application_warnings: list[str] = []
+        for block, replacement_text, report in sorted(
+            planned,
+            key=lambda item: item[0].start,
+            reverse=True,
+        ):
+            if _replace_paragraph_range(
+                paragraph,
+                block.start,
+                block.end,
+                replacement_text,
+            ):
+                applied_reports.append(report)
+            else:
+                application_warnings.append(
+                    f"Could not apply replacement at {location.part} paragraph "
+                    f"{location.paragraph_index}; left original text unchanged: "
+                    f"{block.original_text}"
+                )
+        report_replacements.extend(reversed(applied_reports))
+        warnings.extend(reversed(application_warnings))
 
     return report_replacements, warnings
 
@@ -727,6 +1160,7 @@ def _insert_comment_pmids_at_anchors(
     options: ReplacementOptions,
     records_by_identifier: dict[IdentifierKey, ReferenceRecord],
     context: ReferenceSectionContext,
+    field_depth_cache: FieldDepthCache,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     anchor_locations = context.anchor_locations
     planned_by_comment: dict[int, list[tuple[ReplacementBlock, str, TextLocation]]] = {}
@@ -743,12 +1177,25 @@ def _insert_comment_pmids_at_anchors(
         )
         if not blocks:
             continue
-        if _paragraph_has_unsafe_fields(paragraph):
+        (
+            blocks,
+            field_or_hidden_blocks,
+            tracked_change_blocks,
+            _,
+        ) = _partition_blocks_around_unsafe_content(
+            paragraph,
+            blocks,
+            field_depth_cache,
+            check_run_editability=False,
+        )
+        if field_or_hidden_blocks:
             warnings.append(
-                "Skipped PMID block in comment with field or hidden text content at "
-                f"comment {comment_location.comment_id} paragraph {comment_location.paragraph_index}."
+                _unsafe_content_warning(comment_location, len(field_or_hidden_blocks))
             )
-            continue
+        if tracked_change_blocks:
+            warnings.append(
+                _tracked_change_warning(comment_location, len(tracked_change_blocks))
+            )
         if comment_location.comment_id is None:
             continue
         for block in blocks:
@@ -806,13 +1253,6 @@ def _insert_comment_pmids_at_anchors(
             )
 
     return report_replacements, warnings
-
-
-def _comment_anchor_locations(
-    document: DocxDocument,
-    options: ReplacementOptions,
-) -> dict[int, tuple[Paragraph, TextLocation]]:
-    return _reference_section_context(document, options).anchor_locations
 
 
 def _comment_ids_in_paragraph(paragraph: Paragraph) -> Iterator[int]:
@@ -1087,12 +1527,20 @@ def _skipped_identifier_reports(
     return skipped
 
 
-def _replace_paragraph_range(paragraph: Paragraph, start: int, end: int, replacement: str) -> None:
+def _replace_paragraph_range(
+    paragraph: Paragraph,
+    start: int,
+    end: int,
+    replacement: str,
+) -> bool:
     mapped_runs = _paragraph_text_runs(paragraph)
-    if mapped_runs is None:
-        raise WordProcessingError(
-            "Could not map paragraph text exactly to Word runs; replacement was not applied."
-        )
+    if (
+        mapped_runs is None
+        or _identifier_touches_omitted_content(paragraph, mapped_runs, start, end)
+        or _mapped_runs_interrupted(mapped_runs, start, end)
+        or not _mapped_runs_can_replace_range(mapped_runs, start, end)
+    ):
+        return False
 
     spans: list[tuple[int, int, Run, bool]] = []
     cursor = 0
@@ -1106,16 +1554,12 @@ def _replace_paragraph_range(paragraph: Paragraph, start: int, end: int, replace
     overlapping = [
         (run_start, run_end, run, is_hyperlink_run)
         for run_start, run_end, run, is_hyperlink_run in spans
-        if run_start < end and run_end > start
+        if run_start < run_end and run_start < end and run_end > start
     ]
     if not overlapping:
-        raise WordProcessingError(
-            f"Could not map paragraph replacement range {start}:{end} to Word runs."
-        )
+        return False
     if any(is_hyperlink_run for _, _, _, is_hyperlink_run in overlapping):
-        raise WordProcessingError(
-            f"Refused to replace paragraph range {start}:{end} inside a hyperlink."
-        )
+        return False
 
     first_start, first_end, first_run, _ = overlapping[0]
     last_start, last_end, last_run, _ = overlapping[-1]
@@ -1124,12 +1568,13 @@ def _replace_paragraph_range(paragraph: Paragraph, start: int, end: int, replace
 
     if first_run is last_run:
         first_run.text = before + replacement + after
-        return
+        return True
 
     first_run.text = before + replacement
     for _, _, run, _ in overlapping[1:-1]:
         run.text = ""
     last_run.text = after
+    return True
 
 
 def _create_backup(input_docx: Path) -> Path:
