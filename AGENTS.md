@@ -29,7 +29,7 @@ need to ship as a new app update.
 2. Run tests:
 
 ```bash
-.venv/bin/pytest -q
+.venv-universal/bin/pytest -q
 ```
 
 3. Build the signed macOS app and DMG:
