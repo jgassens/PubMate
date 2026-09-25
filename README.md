@@ -279,13 +279,15 @@ MACOS_NOTARY_PROFILE=PubMate-notary macos/notarize_distribution.sh dist/PubMate-
 
 The DMG is the primary distribution artifact. The notarization helper also supports App Store Connect API key credentials through `MACOS_NOTARY_KEY`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER`; those credentials submit to Apple, but the app still needs a Developer ID Application certificate for public notarized distribution.
 
-The packaged app includes mandatory Sparkle auto-updates. On every launch,
-PubMate checks the GitHub-hosted appcast, downloads eligible updates in the
-background, and lets Sparkle install them silently when the app exits. PubMate
-does not ask the user to enable or approve this update policy, and it clears
-any saved choice to skip an older update. A signed native updater helper
-performs this work on both Apple Silicon and Intel Macs, without loading
-Sparkle through the packaged Python runtime. The appcast is:
+The packaged app includes Sparkle with automatic installation enabled by
+default. Sparkle performs its own daily scheduled checks against the
+GitHub-hosted appcast. PubMate respects choices made in Sparkle's alert,
+including **Skip This Version** and the automatic-install checkbox, and
+postpones relaunch while a conversion is running. A signed universal
+in-process bridge at `Contents/Frameworks/libPubMateSparkle.dylib` connects the
+Tk app to Sparkle without loading it through Python or PyObjC. Debug builds
+compiled with `PUBMATE_DEBUG_FEED=1` may override the feed at runtime with
+`PUBMATE_SPARKLE_FEED_URL`; release builds cannot. The appcast is:
 
 ```text
 https://jgassens.github.io/PubMate/appcast.xml

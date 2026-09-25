@@ -1,10 +1,14 @@
 import builtins
+import os
 from pathlib import Path
 import py_compile
 import shutil
 import subprocess
+import sys
 import tomllib
 from types import SimpleNamespace
+
+import pytest
 
 import pmid2endnote
 from pmid2endnote import macos_launcher
@@ -16,7 +20,9 @@ def test_macos_distribution_scripts_are_present_and_parse() -> None:
     assert Path("macos/prepare_sparkle_appcast.sh").exists()
     assert Path("macos/pubmate_launcher_entry.py").exists()
     assert Path("macos/make_icon.py").exists()
-    assert Path("macos/PubMateUpdater.m").exists()
+    assert Path("macos/PubMateSparkleBridge.m").exists()
+    assert Path("macos/PubMateSparkleState.c").exists()
+    assert Path("macos/PubMateSparkleState.h").exists()
     assert Path("macos/SparkleSupport/Package.swift").exists()
     assert Path("docs/appcast.xml").exists()
     assert Path("docs/macos-distribution.md").exists()
@@ -52,12 +58,15 @@ def test_package_version_matches_pyproject() -> None:
     assert pmid2endnote.__version__ == project["project"]["version"]
 
 
-def test_notarization_help_exits_successfully() -> None:
+def test_notarization_help_exits_successfully(tmp_path: Path) -> None:
+    environment = os.environ.copy()
+    environment["TMPPREFIX"] = str(tmp_path / "zsh")
     completed = subprocess.run(
         ["macos/notarize_distribution.sh", "--help"],
         check=False,
         capture_output=True,
         text=True,
+        env=environment,
     )
 
     assert completed.returncode == 0
@@ -76,114 +85,102 @@ def test_build_script_checks_developer_id_identity() -> None:
     assert "Developer ID signing identity is not installed" in text
 
 
-def test_build_script_embeds_sparkle_metadata() -> None:
+def test_build_script_guards_debug_feed_compiler_flag() -> None:
+    lines = Path("macos/build_distribution.sh").read_text(encoding="utf-8").splitlines()
+    define = "-DPUBMATE_DEBUG_FEED=1"
+    define_lines = [index for index, line in enumerate(lines) if define in line]
+
+    assert len(define_lines) == 1
+
+    guard_start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == 'if [[ "${PUBMATE_DEBUG_FEED:-0}" == "1" ]]; then'
+    )
+    guard_end = next(
+        index
+        for index in range(guard_start + 1, len(lines))
+        if lines[index].strip() == "fi"
+    )
+    assert guard_start < define_lines[0] < guard_end
+
+
+def test_build_script_embeds_sparkle_defaults() -> None:
     text = Path("macos/build_distribution.sh").read_text(encoding="utf-8")
-    helper_text = Path("macos/PubMateUpdater.m").read_text(encoding="utf-8")
-    assert "Sparkle.framework" in text
-    assert "--argv-emulation" in text
-    assert "--collect-data docx" in text
-    assert "--collect-all tkinterdnd2" in text
-    assert "--hidden-import tkinter" in text
-    assert "require_tkdnd_archs" in text
-    assert '"osx-arm64:arm64" "osx-x64:x86_64"' in text
-    assert "tkdnd architecture validation failed" in text
-    assert '*"tkinterdnd2/tkdnd/"*' not in text
-    assert "Contents/Frameworks/docx/templates" in text
-    assert "Contents/Frameworks/docx/parts" in text
-    assert "CFBundleDocumentTypes" in text
-    assert "org.openxmlformats.wordprocessingml.document" in text
     assert "SUFeedURL" in text
     assert "SUPublicEDKey" in text
-    assert "SUEnableAutomaticChecks" in text
+    assert 'plist_set_bool "SUEnableAutomaticChecks" "true"' in text
+    assert 'plist_set_integer "SUScheduledCheckInterval" "86400"' in text
     assert 'plist_set_bool "SUAllowsAutomaticUpdates" "true"' in text
     assert 'plist_set_bool "SUAutomaticallyUpdate" "true"' in text
     assert 'plist_set_bool "SUPromptUserOnFirstLaunch" "false"' in text
-    assert "--sparkle-self-test" in text
-    assert "macos/PubMateUpdater.m" in text
-    assert "Contents/MacOS/PubMateUpdater" in text
-    assert "xcrun clang" in text
-    assert "-framework Cocoa" in text
-    assert "lipo -create" in text
-    assert "PyObjC" not in text
-    assert 'TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"' in text
-    assert "--target-arch" in text
-    assert "Universal2 builds require a universal Python runtime" in text
-    assert "require_macho_archs" in text
-    assert 'lipo -archs "$binary"' in text
-    assert "Every bundled Mach-O file must include" in text
-    assert "Use a universal Python runtime and universal native dependencies" in text
-    assert "updater.automaticallyChecksForUpdates = YES" in helper_text
-    assert "updater.automaticallyDownloadsUpdates = YES" in helper_text
-    assert "updater.allowsAutomaticUpdates" in helper_text
-    assert "[updater checkForUpdatesInBackground]" in helper_text
-    assert '@"SUSkippedVersion"' in helper_text
-    assert '@"SUSkippedMajorVersion"' in helper_text
-    assert '@"SUSkippedMajorSubreleaseVersion"' in helper_text
-    assert "[NSUserDefaults standardUserDefaults]" in helper_text
-    assert "NSApplicationActivationPolicyProhibited" in helper_text
-    assert "NSApplicationActivationPolicyAccessory" in helper_text
-    assert "[updater checkForUpdates]" in helper_text
-    assert "The run loop keys off visible Sparkle windows instead." in helper_text
-    assert "standardUserDriverDidFinishUpdateSession" not in helper_text
-    assert 'strcmp(argv[1], "--check-now")' in helper_text
-    assert "PubMateBackgroundUpdateTimeout = 30.0 * 60.0" in helper_text
-    assert "PubMateManualUpdateTimeout = 4.0 * 60.0 * 60.0" in helper_text
-    assert "PubMateAbsoluteUpdateTimeout = 12.0 * 60.0 * 60.0" in helper_text
-    assert "static BOOL PubMateHasVisibleSparkleWindow(void)" in helper_text
-    assert (
-        "BOOL hasVisibleSparkleWindow = PubMateHasVisibleSparkleWindow();"
-        in helper_text
-    )
-    assert helper_text.count("if (hasVisibleSparkleWindow)") == 3
-    assert "if ([absoluteDeadline timeIntervalSinceNow] <= 0.0)" in helper_text
-    assert "if ([timeoutDeadline timeIntervalSinceNow] <= 0.0)" in helper_text
-    assert "(updater.sessionInProgress ||" not in helper_text
-    assert "flock(lockFile, LOCK_EX | LOCK_NB)" in helper_text
-    assert "NSApplicationSupportDirectory" in helper_text
-    assert '@"PubMate"' in helper_text
-    assert '@"updater.lock"' in helper_text
-    assert "NSCachesDirectory" not in helper_text
-    assert "unlink(" not in helper_text
-    assert "A PubMate update check is already running. Try again shortly." in helper_text
-    assert (
-        'PubMateShowAlert(\n'
-        '                @"Cannot Check for Updates",\n'
-        '                @"PubMate couldn\'t finish checking for updates. Please try again later."'
-        in helper_text
-    )
-    assert helper_text.count('PubMateShowAlert(') >= 6
-    assert text.index('require_macho_archs "$APP_STAGE_PATH"') < text.index(
-        '"$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test'
-    )
-    assert text.index("--sparkle-self-test") < text.index("codesign --verify --deep --strict")
 
 
-def test_build_script_prunes_unsupported_tkdnd_platforms() -> None:
-    text = Path("macos/build_distribution.sh").read_text(encoding="utf-8")
-    prune_function = text.split("prune_tkdnd_platforms()", 1)[1].split(
-        "find_sparkle_framework()", 1
-    )[0]
-
-    assert "prune_tkdnd_platforms()" in text
-    assert "-type l" in prune_function
-    assert '"$root/Contents/Frameworks/tkinterdnd2/tkdnd"' in text
-    assert '"$root/Contents/Resources/tkinterdnd2/tkdnd"' in text
-    assert "osx-arm64|osx-x64" in text
-    assert text.index('prune_tkdnd_platforms "$APP_STAGE_PATH"') < text.index(
-        'require_tkdnd_archs "$APP_STAGE_PATH"'
+def test_sparkle_appcast_rejects_directory_tool_override(tmp_path: Path) -> None:
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("zsh is unavailable")
+    dmg = tmp_path / "PubMate.dmg"
+    dmg.touch()
+    directory = tmp_path / "generate_appcast"
+    directory.mkdir()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHON": sys.executable,
+            "DMG_PATH": str(dmg),
+            "SPARKLE_GENERATE_APPCAST": str(directory),
+        }
     )
 
+    completed = subprocess.run(
+        [zsh, "macos/prepare_sparkle_appcast.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
 
-def test_sparkle_appcast_helper_targets_github_releases() -> None:
-    text = Path("macos/prepare_sparkle_appcast.sh").read_text(encoding="utf-8")
-    assert "jgassens/PubMate" in text
-    assert "releases/download" in text
-    assert 'DOWNLOAD_URL_PREFIX="$DOWNLOAD_URL_PREFIX/"' in text
-    assert 'TARGET_ARCH="${MACOS_TARGET_ARCH:-universal2}"' in text
-    assert ".venv-universal/bin/python" in text
-    assert 'rm -f "$UPDATES_DIR"/*.dmg(N) "$UPDATES_DIR"/*.delta(N)' in text
-    assert "generate_appcast" in text
-    assert "docs/appcast.xml" in text
+    assert completed.returncode != 0
+    assert "not an executable file" in completed.stderr
+
+
+def test_sparkle_appcast_accepts_executable_tool_override(tmp_path: Path) -> None:
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("zsh is unavailable")
+    dmg = tmp_path / "PubMate.dmg"
+    dmg.touch()
+    tool = tmp_path / "generate_appcast"
+    tool.write_text(
+        "#!/bin/sh\n"
+        "for argument do updates_dir=$argument; done\n"
+        'touch "$updates_dir/appcast.xml"\n',
+        encoding="utf-8",
+    )
+    tool.chmod(0o755)
+    appcast = tmp_path / "published" / "appcast.xml"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHON": sys.executable,
+            "DMG_PATH": str(dmg),
+            "UPDATES_DIR": str(tmp_path / "updates"),
+            "APPCAST_OUTPUT": str(appcast),
+            "SPARKLE_GENERATE_APPCAST": str(tool),
+        }
+    )
+
+    completed = subprocess.run(
+        [zsh, "macos/prepare_sparkle_appcast.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert appcast.is_file()
 
 
 def test_macos_launcher_self_test_does_not_open_dialogs(monkeypatch, capsys) -> None:
@@ -191,64 +188,6 @@ def test_macos_launcher_self_test_does_not_open_dialogs(monkeypatch, capsys) -> 
 
     assert macos_launcher.main(["--self-test"]) == 0
     assert macos_launcher.SELF_TEST_MESSAGE in capsys.readouterr().out
-
-
-def test_macos_launcher_sparkle_self_test_does_not_open_dialogs(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(
-        macos_launcher.sparkle,
-        "validate_sparkle_runtime",
-        lambda: "Sparkle runtime self-test OK",
-    )
-
-    assert macos_launcher.main(["--sparkle-self-test"]) == 0
-    assert "Sparkle runtime self-test OK" in capsys.readouterr().out
-
-
-def test_sparkle_launches_detached_native_helper(monkeypatch, tmp_path: Path) -> None:
-    helper = tmp_path / "PubMateUpdater"
-    helper.touch()
-    captured = {}
-
-    def fake_popen(args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return SimpleNamespace(pid=123)
-
-    monkeypatch.delenv("PUBMATE_DISABLE_SPARKLE", raising=False)
-    monkeypatch.setattr(macos_launcher.sparkle, "_find_updater_helper", lambda: helper)
-    monkeypatch.setattr(macos_launcher.sparkle.subprocess, "Popen", fake_popen)
-
-    assert macos_launcher.sparkle.initialize_sparkle_updater() is None
-    assert captured["args"] == [str(helper)]
-    assert captured["kwargs"]["start_new_session"] is True
-    assert captured["kwargs"]["stdin"] is subprocess.DEVNULL
-    assert captured["kwargs"]["stdout"] is subprocess.DEVNULL
-    assert captured["kwargs"]["stderr"] is subprocess.DEVNULL
-
-
-def test_sparkle_self_test_uses_native_helper_without_network(monkeypatch, tmp_path: Path) -> None:
-    helper = tmp_path / "PubMateUpdater"
-    helper.touch()
-    captured = {}
-
-    def fake_run(args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return SimpleNamespace(
-            returncode=0,
-            stdout="PubMate native Sparkle forced-update self-test OK\n",
-            stderr="",
-        )
-
-    monkeypatch.delenv("PUBMATE_DISABLE_SPARKLE", raising=False)
-    monkeypatch.setattr(macos_launcher.sparkle, "_find_updater_helper", lambda: helper)
-    monkeypatch.setattr(macos_launcher.sparkle.subprocess, "run", fake_run)
-
-    result = macos_launcher.sparkle.validate_sparkle_runtime()
-
-    assert result == "PubMate native Sparkle forced-update self-test OK"
-    assert captured["args"] == [str(helper), "--self-test"]
-    assert captured["kwargs"]["timeout"] == 20
 
 
 def _patch_lightweight_processing(monkeypatch) -> None:
@@ -282,8 +221,6 @@ def test_macos_launcher_uses_dropped_docx_path(monkeypatch, tmp_path: Path) -> N
     input_docx.write_bytes(b"fake docx bytes")
     captured = {}
 
-    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
-
     def fake_gui_run(initial_docx=None):
         captured["path"] = initial_docx
         return 0
@@ -303,7 +240,6 @@ def test_macos_launcher_reprompts_after_blank_email(monkeypatch, tmp_path: Path)
     yes_no_answers = iter([False, True])
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
-    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
     _force_tkinter_fallback(monkeypatch)
     _patch_lightweight_processing(monkeypatch)
     monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: None)
@@ -344,7 +280,6 @@ def test_macos_launcher_closes_from_missing_email_prompt(monkeypatch, tmp_path: 
     input_docx.write_bytes(b"fake docx bytes")
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
-    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
     _force_tkinter_fallback(monkeypatch)
     monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: None)
     monkeypatch.setattr(macos_launcher, "_prompt_text", lambda prompt, optional=False: "")
@@ -366,7 +301,6 @@ def test_macos_launcher_rejects_non_docx_launch_arg(monkeypatch, tmp_path: Path)
     alerts = []
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
-    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
     monkeypatch.setattr(
         macos_launcher,
         "_choose_docx",
@@ -394,7 +328,6 @@ def test_macos_launcher_reports_unexpected_processing_error(monkeypatch, tmp_pat
     yes_no_answers = iter([False, True])
 
     monkeypatch.setattr(macos_launcher.shutil, "which", lambda name: "/usr/bin/osascript")
-    monkeypatch.setattr(macos_launcher.sparkle, "initialize_sparkle_updater", lambda: None)
     _force_tkinter_fallback(monkeypatch)
     _patch_lightweight_processing(monkeypatch)
     monkeypatch.setattr(macos_launcher, "get_saved_email", lambda: "test@example.edu")

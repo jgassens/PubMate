@@ -18,43 +18,116 @@ from pmid2endnote.gui import (
 )
 
 
-def test_settings_check_for_updates_shows_error_without_closing(monkeypatch) -> None:
-    errors: list[tuple[str, str, object]] = []
+def test_settings_check_for_updates_uses_in_process_bridge(monkeypatch) -> None:
+    checks: list[bool] = []
     window = SimpleNamespace(destroy=lambda: pytest.fail("dialog must stay open"))
     dialog = object.__new__(SettingsDialog)
     dialog.window = window
+    monkeypatch.setattr(gui.sparkle, "start", lambda: True)
+    monkeypatch.setattr(gui.sparkle, "check_now", lambda: checks.append(True) or True)
+
+    dialog._check_for_updates()
+
+    assert checks == [True]
+
+
+def test_update_check_reports_bridge_start_failure(monkeypatch) -> None:
+    alerts: list[tuple[str, str, object]] = []
+    parent = object()
+    monkeypatch.setattr(gui.sparkle, "start", lambda: False)
     monkeypatch.setattr(
         gui.sparkle,
-        "check_for_updates_now",
-        lambda: "Updater helper is unavailable.",
+        "check_now",
+        lambda: pytest.fail("must not check after startup failure"),
     )
     monkeypatch.setattr(
         gui.messagebox,
         "showerror",
-        lambda title, message, parent: errors.append((title, message, parent)),
+        lambda title, message, parent: alerts.append((title, message, parent)),
     )
 
-    dialog._check_for_updates()
+    gui._check_for_updates(parent)
 
-    assert errors == [
-        ("Check for Updates", "Updater helper is unavailable.", window)
-    ]
+    assert alerts[0][0] == "Check for Updates"
+    assert "The updater could not be loaded" in alerts[0][1]
+    assert "https://github.com/jgassens/PubMate/releases" in alerts[0][1]
+    assert alerts[0][2] is parent
 
 
-def test_settings_check_for_updates_success_has_no_dialog_and_stays_open(
+def test_update_check_does_not_alert_when_sparkle_cannot_check(monkeypatch) -> None:
+    monkeypatch.setattr(gui.sparkle, "start", lambda: True)
+    monkeypatch.setattr(gui.sparkle, "check_now", lambda: False)
+    monkeypatch.setattr(
+        gui.messagebox,
+        "showerror",
+        lambda *_args, **_kwargs: pytest.fail("Sparkle already owns the UI"),
+    )
+
+    gui._check_for_updates(object())
+
+
+def test_settings_update_button_is_hidden_when_sparkle_is_unavailable(
     monkeypatch,
 ) -> None:
-    window = SimpleNamespace(destroy=lambda: pytest.fail("dialog must stay open"))
-    dialog = object.__new__(SettingsDialog)
-    dialog.window = window
-    monkeypatch.setattr(gui.sparkle, "check_for_updates_now", lambda: None)
-    monkeypatch.setattr(
-        gui.messagebox,
-        "showerror",
-        lambda *args, **kwargs: pytest.fail("Sparkle owns the success UI"),
-    )
+    buttons: list[dict[str, object]] = []
 
-    dialog._check_for_updates()
+    class FakeWidget:
+        def __init__(self, _parent: object = None, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def grid(self, **_kwargs: object) -> None:
+            pass
+
+        def columnconfigure(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class FakeButton(FakeWidget):
+        def __init__(self, parent: object, **kwargs: object) -> None:
+            super().__init__(parent, **kwargs)
+            buttons.append(kwargs)
+
+    dialog = object.__new__(SettingsDialog)
+    dialog._check_for_updates = lambda: None
+    monkeypatch.setattr(gui.sparkle, "available", lambda: False)
+    monkeypatch.setattr(gui.ttk, "Frame", FakeWidget)
+    monkeypatch.setattr(gui.ttk, "Label", FakeWidget)
+    monkeypatch.setattr(gui.ttk, "Button", FakeButton)
+
+    dialog._build_update_controls(object())
+
+    assert buttons == []
+
+
+def test_settings_update_button_is_shown_when_sparkle_is_available(
+    monkeypatch,
+) -> None:
+    buttons: list[dict[str, object]] = []
+
+    class FakeWidget:
+        def __init__(self, _parent: object = None, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def grid(self, **_kwargs: object) -> None:
+            pass
+
+        def columnconfigure(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class FakeButton(FakeWidget):
+        def __init__(self, parent: object, **kwargs: object) -> None:
+            super().__init__(parent, **kwargs)
+            buttons.append(kwargs)
+
+    dialog = object.__new__(SettingsDialog)
+    dialog._check_for_updates = lambda: None
+    monkeypatch.setattr(gui.sparkle, "available", lambda: True)
+    monkeypatch.setattr(gui.ttk, "Frame", FakeWidget)
+    monkeypatch.setattr(gui.ttk, "Label", FakeWidget)
+    monkeypatch.setattr(gui.ttk, "Button", FakeButton)
+
+    dialog._build_update_controls(object())
+
+    assert [button["text"] for button in buttons] == ["Check for Updates…"]
 
 
 def test_settings_return_invokes_focused_button() -> None:
@@ -92,65 +165,6 @@ def test_settings_return_saves_when_nothing_has_focus() -> None:
     assert saves == [True]
 
 
-def test_periodic_update_check_runs_and_rearms_after_24_hours(monkeypatch) -> None:
-    after_calls: list[tuple[int, object]] = []
-    update_calls: list[bool] = []
-    application = object.__new__(PubMateGUI)
-    application.root = SimpleNamespace(
-        after=lambda delay, callback: after_calls.append((delay, callback))
-    )
-    application._running = False
-    monkeypatch.setattr(
-        application, "_supports_periodic_update_checks", lambda: True
-    )
-    monkeypatch.setattr(gui.sparkle, "updater_process_is_running", lambda: False)
-    monkeypatch.setattr(
-        gui.sparkle,
-        "initialize_sparkle_updater",
-        lambda: update_calls.append(True) or None,
-    )
-
-    application._schedule_periodic_update_check()
-    assert after_calls == [
-        (application.UPDATE_CHECK_INTERVAL_MS, application._periodic_update_check)
-    ]
-
-    after_calls.pop()[1]()
-    assert update_calls == [True]
-    assert after_calls == [
-        (application.UPDATE_CHECK_INTERVAL_MS, application._periodic_update_check)
-    ]
-
-
-@pytest.mark.parametrize("running,helper_alive", [(True, False), (False, True)])
-def test_periodic_update_check_retries_when_busy_or_helper_alive(
-    monkeypatch, running: bool, helper_alive: bool
-) -> None:
-    after_calls: list[tuple[int, object]] = []
-    application = object.__new__(PubMateGUI)
-    application.root = SimpleNamespace(
-        after=lambda delay, callback: after_calls.append((delay, callback))
-    )
-    application._running = running
-    monkeypatch.setattr(
-        application, "_supports_periodic_update_checks", lambda: True
-    )
-    monkeypatch.setattr(
-        gui.sparkle, "updater_process_is_running", lambda: helper_alive
-    )
-    monkeypatch.setattr(
-        gui.sparkle,
-        "initialize_sparkle_updater",
-        lambda: pytest.fail("a busy app must not launch the helper"),
-    )
-
-    application._periodic_update_check()
-
-    assert after_calls == [
-        (application.UPDATE_CHECK_RETRY_MS, application._periodic_update_check)
-    ]
-
-
 def test_click_gate_requires_matching_press_and_inside_release() -> None:
     gate = ClickGate()
 
@@ -162,13 +176,14 @@ def test_click_gate_requires_matching_press_and_inside_release() -> None:
     assert gate.release(inside=True) is True
 
 
-def test_click_gate_suppresses_chooser_during_and_after_settings() -> None:
+def test_click_gate_clears_press_and_suppresses_chooser_after_settings() -> None:
     now = [10.0]
     gate = ClickGate(clock=lambda: now[0])
 
     assert gate.should_open() is True
+    gate.press()
     gate.settings_opened()
-    assert gate.should_open() is False
+    assert gate.release(inside=True) is False
     gate.settings_closed()
     assert gate.should_open() is False
     now[0] += 0.399
@@ -289,6 +304,7 @@ def test_open_event_defers_native_file_chooser(monkeypatch) -> None:
         after_idle=lambda callback: idle_callbacks.append(callback)
     )
     application._running = False
+    application._settings_open = False
     application._chooser_pending = False
     application._click_gate = ClickGate()
     monkeypatch.setattr(
@@ -305,6 +321,24 @@ def test_open_event_defers_native_file_chooser(monkeypatch) -> None:
     assert len(chooser_calls) == 1
 
 
+def test_drop_callback_defers_all_drop_handling_until_idle() -> None:
+    idle_callbacks: list[object] = []
+    conversions: list[Path] = []
+    application = object.__new__(PubMateGUI)
+    application.root = SimpleNamespace(
+        after_idle=lambda callback: idle_callbacks.append(callback),
+        tk=SimpleNamespace(splitlist=lambda value: (value,)),
+    )
+    application._running = False
+    application.start_conversion = conversions.append
+
+    assert application._on_drop(SimpleNamespace(data="/tmp/draft.docx")) == "break"
+    assert conversions == []
+
+    idle_callbacks[0]()
+    assert conversions == [Path("/tmp/draft.docx")]
+
+
 def test_chooser_pending_resets_after_idle_scheduling_or_callback_failure(monkeypatch) -> None:
     idle_callbacks: list[object] = []
     attempts = 0
@@ -319,6 +353,7 @@ def test_chooser_pending_resets_after_idle_scheduling_or_callback_failure(monkey
     application = object.__new__(PubMateGUI)
     application.root = SimpleNamespace(after_idle=after_idle)
     application._running = False
+    application._settings_open = False
     application._chooser_pending = False
     application._click_gate = ClickGate()
 
@@ -352,6 +387,7 @@ def test_drop_release_without_press_does_not_schedule_chooser() -> None:
         winfo_height=lambda: 50,
     )
     application._running = False
+    application._settings_open = False
     application._chooser_pending = False
     application._click_gate = ClickGate()
     event = SimpleNamespace(x_root=30, y_root=40)
@@ -384,6 +420,166 @@ def test_open_settings_does_not_stack_dialogs(monkeypatch) -> None:
     assert application._settings_open is False
 
 
+def test_show_preferences_routes_exceptions_to_tk(monkeypatch) -> None:
+    reported: list[tuple[object, object, object]] = []
+    application = object.__new__(PubMateGUI)
+    application.root = SimpleNamespace(
+        report_callback_exception=lambda *info: reported.append(info)
+    )
+    application.open_settings = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+
+    assert application._settings_event(None) == "break"
+
+    assert len(reported) == 1
+    assert reported[0][0] is RuntimeError
+    assert str(reported[0][1]) == "boom"
+
+
+def test_quit_during_conversion_respects_no(monkeypatch) -> None:
+    prompts: list[dict[str, object]] = []
+    destroyed: list[bool] = []
+    root = SimpleNamespace(destroy=lambda: destroyed.append(True))
+    application = object.__new__(PubMateGUI)
+    application.root = root
+    application._running = True
+    monkeypatch.setattr(
+        gui.messagebox,
+        "askyesno",
+        lambda title, message, **kwargs: prompts.append(
+            {"title": title, "message": message, **kwargs}
+        )
+        or False,
+    )
+
+    assert application._quit_event() == "break"
+    assert destroyed == []
+    assert prompts[0]["title"] == "Conversion in progress"
+    assert prompts[0]["parent"] is root
+    assert prompts[0]["default"] == gui.messagebox.NO
+
+
+def test_quit_during_conversion_yes_clears_busy_then_destroys(monkeypatch) -> None:
+    events: list[object] = []
+    root = SimpleNamespace(destroy=lambda: events.append("destroy"))
+    application = object.__new__(PubMateGUI)
+    application.root = root
+    application._running = True
+    application._set_running = lambda running: events.append(("running", running))
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *_args, **_kwargs: True)
+
+    application._request_quit()
+    assert events == [("running", False), "destroy"]
+
+
+def test_conversion_error_clears_sparkle_busy_state(monkeypatch, tmp_path: Path) -> None:
+    busy_states: list[bool] = []
+    statuses: list[str] = []
+    application = object.__new__(PubMateGUI)
+    application.root = object()
+    application.status = SimpleNamespace(set=statuses.append)
+    application._drop_widgets = []
+    application._append_log = lambda _message: None
+    application._reveal_if_populated = lambda _folder: None
+    application._clean_old_folders = lambda: None
+    monkeypatch.setattr(gui.sparkle, "set_busy", busy_states.append)
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *_args, **_kwargs: None)
+
+    application._set_running(True)
+    application._handle_error("failed", tmp_path)
+
+    assert busy_states == [True, False]
+    assert application._running is False
+
+
+def test_conversion_error_clears_busy_before_showing_alert(
+    monkeypatch, tmp_path: Path
+) -> None:
+    events: list[object] = []
+    application = object.__new__(PubMateGUI)
+    application.root = object()
+    application.status = SimpleNamespace(set=lambda _status: None)
+    application._append_log = lambda _message: None
+    application._reveal_if_populated = lambda _folder: None
+    application._clean_old_folders = lambda: None
+    application._set_running = lambda running: events.append(("running", running))
+    monkeypatch.setattr(
+        gui.messagebox,
+        "showerror",
+        lambda *_args, **_kwargs: events.append("alert"),
+    )
+
+    application._handle_error("failed", tmp_path)
+
+    assert events == [("running", False), "alert"]
+
+
+def test_handle_result_clears_busy(tmp_path: Path) -> None:
+    states: list[bool] = []
+    application = object.__new__(PubMateGUI)
+    application.root = object()
+    application.status = SimpleNamespace(set=lambda _status: None)
+    application._append_log = lambda _message: None
+    application._reveal_if_populated = lambda _folder: None
+    application._clean_old_folders = lambda: None
+    application._set_running = states.append
+
+    application._handle_result(
+        SimpleNamespace(exit_code=0, messages=()),
+        tmp_path,
+    )
+
+    assert states == [False]
+
+
+def test_thread_start_failure_clears_busy(monkeypatch, tmp_path: Path) -> None:
+    busy_states: list[bool] = []
+    application = object.__new__(PubMateGUI)
+    application.root = object()
+    application.status = SimpleNamespace(set=lambda _status: None)
+    application._running = False
+    application._drop_widgets = []
+    application._document_error = lambda _path: None
+    application._append_log = lambda _message: None
+    monkeypatch.setattr(gui, "get_saved_email", lambda: "person@example.edu")
+    monkeypatch.setattr(gui, "create_conversion_folder", lambda _path: tmp_path)
+    monkeypatch.setattr(gui, "load_gui_settings", lambda: {})
+    monkeypatch.setattr(gui.sparkle, "set_busy", busy_states.append)
+
+    class BrokenThread:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("cannot start thread")
+
+    monkeypatch.setattr(gui.threading, "Thread", BrokenThread)
+
+    with pytest.raises(RuntimeError, match="cannot start thread"):
+        application.start_conversion(tmp_path / "draft.docx")
+
+    assert busy_states == [True, False]
+    assert application._running is False
+
+
+def test_run_starts_sparkle_from_tk_main_loop(monkeypatch) -> None:
+    scheduled: list[tuple[int, object]] = []
+    root = SimpleNamespace(
+        after=lambda delay, callback, *args: scheduled.append((delay, callback)),
+        mainloop=lambda: None,
+    )
+    starts: list[bool] = []
+    monkeypatch.setattr(gui, "create_root", lambda: (root, False))
+    monkeypatch.setattr(gui, "PubMateGUI", lambda _root, _dnd: object())
+    monkeypatch.setattr(gui.sparkle, "start", lambda: starts.append(True) or True)
+
+    assert gui.run() == 0
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 0
+
+    scheduled[0][1]()
+    assert starts == [True]
+
+
 def test_macos_menu_registers_native_settings_without_duplicate_entry_or_binding(
     monkeypatch,
 ) -> None:
@@ -409,9 +605,21 @@ def test_macos_menu_registers_native_settings_without_duplicate_entry_or_binding
             self.commands: list[tuple[str, object]] = []
             self.bindings: list[tuple[str, object]] = []
             self.configured_menu: object | None = None
+            self.registered: dict[str, object] = {}
+            self.tk_calls: list[str] = []
+            self.tk = SimpleNamespace(call=self.call)
 
         def createcommand(self, name: str, callback: object) -> None:
             self.commands.append((name, callback))
+
+        def register(self, callback: object) -> str:
+            name = f"pycmd{len(self.registered)}"
+            self.registered[name] = callback
+            return name
+
+        def call(self, name: str) -> object:
+            self.tk_calls.append(name)
+            return self.registered[name]()
 
         def bind_all(self, sequence: str, callback: object) -> None:
             self.bindings.append((sequence, callback))
@@ -430,11 +638,13 @@ def test_macos_menu_registers_native_settings_without_duplicate_entry_or_binding
     application._open_event = lambda _event: "break"
     monkeypatch.setattr(gui.tk, "Menu", FakeMenu)
     monkeypatch.setattr(gui.sys, "platform", "darwin")
+    monkeypatch.setattr(gui.sparkle, "available", lambda: True)
 
     application._build_menu()
 
     assert [name for name, _callback in root.commands] == [
-        "::tk::mac::ShowPreferences"
+        "::tk::mac::ShowPreferences",
+        "::tk::mac::Quit",
     ]
     assert "<Command-comma>" not in [sequence for sequence, _callback in root.bindings]
     assert [sequence for sequence, _callback in root.bindings] == ["<Command-o>"]
@@ -444,6 +654,13 @@ def test_macos_menu_registers_native_settings_without_duplicate_entry_or_binding
         for entry in menu.entries
         if entry[0] == "command"
     )
+    assert any(
+        entry[1].get("label") == "Check for Updates…"
+        for menu in FakeMenu.instances
+        for entry in menu.entries
+        if entry[0] == "command"
+    )
 
     root.commands[0][1]()
     assert settings_events == [None]
+    assert root.tk_calls == ["pycmd0"]

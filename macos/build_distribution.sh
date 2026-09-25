@@ -74,6 +74,7 @@ Environment:
   SPARKLE_FRAMEWORK_PATH     Optional explicit path to Sparkle.framework.
   SPARKLE_FEED_URL           Appcast URL. Defaults to https://jgassens.github.io/PubMate/appcast.xml.
   SPARKLE_PUBLIC_ED_KEY      Sparkle public EdDSA key.
+  PUBMATE_DEBUG_FEED         Set to 1 only for a local build that may override the feed URL.
 
 Outputs:
   dist/PubMate.app
@@ -262,47 +263,81 @@ find_sparkle_framework() {
   return 1
 }
 
-build_sparkle_helper() {
+build_sparkle_bridge() {
   local frameworks_dir="$1"
-  local helper_source="$PROJECT_DIR/macos/PubMateUpdater.m"
-  local helper_output="$APP_STAGE_PATH/Contents/MacOS/PubMateUpdater"
-  local helper_build_dir="$BUILD_DIR/sparkle-helper"
-  local helper_archs=()
-  local helper_arch helper_slice
-  local helper_slices=()
+  local bridge_source="$PROJECT_DIR/macos/PubMateSparkleBridge.m"
+  local state_source="$PROJECT_DIR/macos/PubMateSparkleState.c"
+  local bridge_output="$APP_STAGE_PATH/Contents/Frameworks/libPubMateSparkle.dylib"
+  local bridge_build_dir="$BUILD_DIR/sparkle-bridge"
+  local bridge_archs=()
+  local bridge_arch bridge_slice
+  local bridge_object state_object
+  local bridge_slices=()
+  local debug_feed_flags=()
+
+  if [[ "${PUBMATE_DEBUG_FEED:-0}" == "1" ]]; then
+    echo "WARNING: BUILDING WITH PUBMATE_DEBUG_FEED=1; DO NOT DISTRIBUTE THIS BUILD" >&2
+    debug_feed_flags=(-DPUBMATE_DEBUG_FEED=1)
+  fi
 
   case "$TARGET_ARCH" in
     universal2)
-      helper_archs=(arm64 x86_64)
+      bridge_archs=(arm64 x86_64)
       ;;
     arm64|x86_64)
-      helper_archs=("$TARGET_ARCH")
+      bridge_archs=("$TARGET_ARCH")
       ;;
   esac
 
-  mkdir -p "$helper_build_dir"
-  for helper_arch in "${helper_archs[@]}"; do
-    helper_slice="$helper_build_dir/PubMateUpdater-$helper_arch"
+  mkdir -p "$bridge_build_dir"
+  for bridge_arch in "${bridge_archs[@]}"; do
+    bridge_slice="$bridge_build_dir/libPubMateSparkle-$bridge_arch.dylib"
+    bridge_object="$bridge_build_dir/PubMateSparkleBridge-$bridge_arch.o"
+    state_object="$bridge_build_dir/PubMateSparkleState-$bridge_arch.o"
     xcrun clang \
-      -arch "$helper_arch" \
+      -arch "$bridge_arch" \
+      -c \
       -fobjc-arc \
       -fblocks \
       -mmacosx-version-min=13.0 \
+      "${debug_feed_flags[@]}" \
       -F "$frameworks_dir" \
-      -framework Cocoa \
+      "$bridge_source" \
+      -o "$bridge_object"
+    xcrun clang \
+      -arch "$bridge_arch" \
+      -c \
+      -std=c11 \
+      -mmacosx-version-min=13.0 \
+      "$state_source" \
+      -o "$state_object"
+    xcrun clang \
+      -arch "$bridge_arch" \
+      -dynamiclib \
+      -mmacosx-version-min=13.0 \
+      -F "$frameworks_dir" \
+      -framework AppKit \
       -framework Sparkle \
-      -Wl,-rpath,@executable_path/../Frameworks \
-      "$helper_source" \
-      -o "$helper_slice"
-    helper_slices+=("$helper_slice")
+      -Wl,-rpath,@loader_path \
+      -Wl,-install_name,@rpath/libPubMateSparkle.dylib \
+      "$bridge_object" \
+      "$state_object" \
+      -o "$bridge_slice"
+    bridge_slices+=("$bridge_slice")
   done
 
-  if [[ "${#helper_slices[@]}" -eq 1 ]]; then
-    cp "${helper_slices[1]}" "$helper_output"
+  if [[ "${#bridge_slices[@]}" -eq 1 ]]; then
+    cp "${bridge_slices[1]}" "$bridge_output"
   else
-    lipo -create "${helper_slices[@]}" -output "$helper_output"
+    lipo -create "${bridge_slices[@]}" -output "$bridge_output"
   fi
-  chmod 755 "$helper_output"
+  chmod 644 "$bridge_output"
+  local bridge_load_commands
+  bridge_load_commands="$(otool -l "$bridge_output")"
+  if [[ "$bridge_load_commands" != *"path @loader_path "* ]]; then
+    echo "error: Sparkle bridge is missing its @loader_path LC_RPATH" >&2
+    return 1
+  fi
 }
 
 sign_target() {
@@ -455,7 +490,7 @@ if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
   rm -rf "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
   ditto --norsrc --noextattr "$SPARKLE_FRAMEWORK_RESOLVED" "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
   clean_macos_metadata "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
-  build_sparkle_helper "$APP_STAGE_PATH/Contents/Frameworks"
+  build_sparkle_bridge "$APP_STAGE_PATH/Contents/Frameworks"
 fi
 
 require_tkdnd_archs "$APP_STAGE_PATH"
@@ -475,6 +510,14 @@ plist_set_bool() {
   local plist="$APP_STAGE_PATH/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :$key $value" "$plist" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Add :$key bool $value" "$plist"
+}
+
+plist_set_integer() {
+  local key="$1"
+  local value="$2"
+  local plist="$APP_STAGE_PATH/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :$key $value" "$plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Add :$key integer $value" "$plist"
 }
 
 plist_register_docx() {
@@ -502,21 +545,19 @@ if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
   plist_set_string "SUFeedURL" "$SPARKLE_FEED_URL"
   plist_set_string "SUPublicEDKey" "$SPARKLE_PUBLIC_ED_KEY"
   plist_set_bool "SUEnableAutomaticChecks" "true"
+  plist_set_integer "SUScheduledCheckInterval" "86400"
   plist_set_bool "SUAllowsAutomaticUpdates" "true"
   plist_set_bool "SUAutomaticallyUpdate" "true"
   plist_set_bool "SUPromptUserOnFirstLaunch" "false"
 fi
 
 "$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --self-test >/dev/null
-if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
-  "$APP_STAGE_PATH/Contents/MacOS/$APP_NAME" --sparkle-self-test >/dev/null
-fi
 
 if [[ "$SIGN_APP" -eq 1 ]]; then
   clean_macos_metadata "$APP_STAGE_PATH"
   if [[ "$SPARKLE_ENABLED" -eq 1 ]]; then
     sign_nested_bundles "$APP_STAGE_PATH/Contents/Frameworks/Sparkle.framework"
-    sign_target "$APP_STAGE_PATH/Contents/MacOS/PubMateUpdater"
+    sign_target "$APP_STAGE_PATH/Contents/Frameworks/libPubMateSparkle.dylib"
   fi
   sign_target "$APP_STAGE_PATH"
   codesign --verify --deep --strict --verbose=2 "$APP_STAGE_PATH"

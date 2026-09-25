@@ -133,17 +133,18 @@ SUAutomaticallyUpdate=true
 SUPromptUserOnFirstLaunch=false
 ```
 
-The build script embeds `Sparkle.framework` plus a universal native
-`Contents/MacOS/PubMateUpdater` helper, sets the appcast and mandatory update
-keys in `Info.plist`, signs every updater component, and runs a packaged
-`--sparkle-self-test` before creating the DMG. On every launch PubMate starts
-that helper in the background. The helper overrides stored preferences to keep
-automatic checks and downloads on, clears any saved Sparkle skip-version
-choice, verifies automatic updating is enabled, then forces an immediate
-background check. Sparkle downloads eligible updates without asking and
-installs them silently when PubMate exits. The helper runs natively on both
-Apple Silicon and Intel Macs and avoids loading Sparkle through Python or
-PyObjC.
+The build script embeds `Sparkle.framework` and the universal in-process bridge
+`Contents/Frameworks/libPubMateSparkle.dylib`, sets Sparkle defaults in
+`Info.plist`, and signs both before creating the DMG. Sparkle performs its own
+scheduled checks daily. Automatic installation is enabled by default, while
+the choices a user makes in Sparkle's alert—including **Skip This Version** and
+the automatic-install checkbox—are respected. If an update is ready while a
+conversion is running, relaunch is postponed until the conversion ends.
+
+Release builds always use the appcast URL from `Info.plist`. A feed override is
+available only in builds compiled with `PUBMATE_DEBUG_FEED=1`; those debug
+builds may read `PUBMATE_SPARKLE_FEED_URL` at runtime and must not be
+distributed.
 
 If Sparkle is not already available locally, resolve it once:
 

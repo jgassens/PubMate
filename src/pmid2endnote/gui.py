@@ -54,6 +54,23 @@ from pmid2endnote.settings import (
 )
 
 
+_UPDATER_LOAD_ERROR = (
+    "The updater could not be loaded.\n\n"
+    "Download the latest version from https://github.com/jgassens/PubMate/releases"
+)
+
+
+def _check_for_updates(parent: object) -> None:
+    """Start Sparkle and request a check, reporting only startup failures."""
+
+    if not sparkle.start():
+        messagebox.showerror("Check for Updates", _UPDATER_LOAD_ERROR, parent=parent)
+        return
+    # A false result here means Sparkle cannot check yet, generally because its
+    # own update UI is already active. Do not put a second alert over it.
+    sparkle.check_now()
+
+
 def parse_dropped_paths(
     tk_data_string: str,
     splitlist: Callable[[str], tuple[str, ...] | list[str]],
@@ -146,7 +163,6 @@ class ClickGate:
         self._clock = clock
         self._cooldown_seconds = cooldown_seconds
         self._pressed = False
-        self._settings_open = False
         self._settings_closed_at: float | None = None
 
     def press(self) -> None:
@@ -159,15 +175,11 @@ class ClickGate:
 
     def settings_opened(self) -> None:
         self._pressed = False
-        self._settings_open = True
 
     def settings_closed(self) -> None:
-        self._settings_open = False
         self._settings_closed_at = self._clock()
 
     def should_open(self) -> bool:
-        if self._settings_open:
-            return False
         if self._settings_closed_at is None:
             return True
         return self._clock() - self._settings_closed_at >= self._cooldown_seconds
@@ -245,17 +257,7 @@ class SettingsDialog:
             variable=self.skip_reference_section,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
 
-        updates = ttk.Frame(frame)
-        updates.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
-        ttk.Label(updates, text=f"PubMate {__version__}").grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Button(
-            updates,
-            text="Check for Updates…",
-            command=self._check_for_updates,
-        ).grid(row=0, column=1, sticky="e", padx=(16, 0))
-        updates.columnconfigure(0, weight=1)
+        self._build_update_controls(frame)
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(16, 0))
@@ -271,6 +273,20 @@ class SettingsDialog:
         email_entry.focus_set()
         self.window.wait_window()
 
+    def _build_update_controls(self, frame: object) -> None:
+        updates = ttk.Frame(frame)
+        updates.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        ttk.Label(updates, text=f"PubMate {__version__}").grid(
+            row=0, column=0, sticky="w"
+        )
+        if sparkle.available():
+            ttk.Button(
+                updates,
+                text="Check for Updates…",
+                command=self._check_for_updates,
+            ).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        updates.columnconfigure(0, weight=1)
+
     def _close(self) -> None:
         try:
             self.window.grab_release()
@@ -279,9 +295,7 @@ class SettingsDialog:
         self.window.destroy()
 
     def _check_for_updates(self) -> None:
-        error = sparkle.check_for_updates_now()
-        if error:
-            messagebox.showerror("Check for Updates", error, parent=self.window)
+        _check_for_updates(self.window)
 
     def _handle_return(self, _event: object) -> str:
         focused = self.window.focus_get()
@@ -333,27 +347,18 @@ class PubMateGUI:
         self._configure_drop_targets()
         self._clean_old_folders()
         self._poll_queue()
-        self._schedule_periodic_update_check()
+        self.root.protocol("WM_DELETE_WINDOW", self._request_quit)
 
-    UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
-    UPDATE_CHECK_RETRY_MS = 10 * 60 * 1000
+    def _install_macos_command(self, name: str, callback: Callable[[], object]) -> None:
+        """Install a Tk macOS command through Tkinter's exception wrapper.
 
-    @staticmethod
-    def _supports_periodic_update_checks() -> bool:
-        return sys.platform == "darwin" and bool(getattr(sys, "frozen", False))
+        The Tcl hop also routes callbacks, including ``_settings_event``, to
+        ``report_callback_exception`` when they raise.
+        """
 
-    def _schedule_periodic_update_check(self, delay_ms: int | None = None) -> None:
-        if not self._supports_periodic_update_checks():
-            return
-        delay = self.UPDATE_CHECK_INTERVAL_MS if delay_ms is None else delay_ms
-        self.root.after(delay, self._periodic_update_check)
-
-    def _periodic_update_check(self) -> None:
-        if self._running or sparkle.updater_process_is_running():
-            self._schedule_periodic_update_check(self.UPDATE_CHECK_RETRY_MS)
-            return
-        sparkle.initialize_sparkle_updater()
-        self._schedule_periodic_update_check()
+        registered = self.root.register(callback)
+        command = lambda registered=registered: self.root.tk.call(registered)
+        self.root.createcommand(name, command)
 
     def _build_menu(self) -> None:
         menu_bar = tk.Menu(self.root)
@@ -371,10 +376,15 @@ class PubMateGUI:
         if sys.platform == "darwin":
             application_menu = tk.Menu(menu_bar, name="apple", tearoff=False)
             application_menu.add_command(label="About PubMate", command=self.show_about)
+            if sparkle.available():
+                application_menu.add_command(
+                    label="Check for Updates…", command=self.check_for_updates
+                )
             menu_bar.add_cascade(menu=application_menu)
-            self.root.createcommand(
+            self._install_macos_command(
                 "::tk::mac::ShowPreferences", lambda: self._settings_event(None)
             )
+            self._install_macos_command("::tk::mac::Quit", self._quit_event)
             self.root.bind_all("<Command-o>", self._open_event)
         else:
             file_menu.add_separator()
@@ -444,16 +454,20 @@ class PubMateGUI:
             widget.dnd_bind("<<Drop>>", self._on_drop)
 
     def _on_drop(self, event: object) -> str:
+        drop_data = event.data
+        self.root.after_idle(lambda: self._handle_drop(drop_data))
+        return "break"
+
+    def _handle_drop(self, drop_data: str) -> None:
         if self._running:
-            return "break"
-        paths = parse_dropped_paths(event.data, self.root.tk.splitlist)
+            return
+        paths = parse_dropped_paths(drop_data, self.root.tk.splitlist)
         if len(paths) != 1:
             messagebox.showerror(
                 "Invalid drop", "Drop one Word .docx file at a time.", parent=self.root
             )
-            return "break"
+            return
         self.start_conversion(paths[0])
-        return "break"
 
     def _drop_press_event(self, _event: object) -> str:
         self._click_gate.press()
@@ -469,13 +483,41 @@ class PubMateGUI:
         return "break"
 
     def _settings_event(self, _event: object) -> str:
-        self.open_settings()
+        try:
+            self.open_settings()
+        except Exception:
+            self.root.report_callback_exception(*sys.exc_info())
         return "break"
+
+    def _quit_event(self) -> str:
+        self._request_quit()
+        return "break"
+
+    def _request_quit(self) -> None:
+        if self._running:
+            if not messagebox.askyesno(
+                "Conversion in progress",
+                "A conversion is still running. Quit anyway? "
+                "The current conversion will be lost.",
+                parent=self.root,
+                default=messagebox.NO,
+            ):
+                return
+            self._set_running(False)
+        self.root.destroy()
+
+    def check_for_updates(self) -> None:
+        _check_for_updates(self.root)
 
     def choose_file(self) -> None:
         """Request the native chooser from a later main-loop iteration."""
 
-        if self._running or self._chooser_pending or not self._click_gate.should_open():
+        if (
+            self._running
+            or self._settings_open
+            or self._chooser_pending
+            or not self._click_gate.should_open()
+        ):
             return
         self._chooser_pending = True
         try:
@@ -486,7 +528,11 @@ class PubMateGUI:
 
     def _show_file_chooser(self) -> None:
         try:
-            if self._running or not self._click_gate.should_open():
+            if (
+                self._running
+                or self._settings_open
+                or not self._click_gate.should_open()
+            ):
                 return
             filename = filedialog.askopenfilename(
                 parent=self.root,
@@ -532,14 +578,18 @@ class PubMateGUI:
 
         options = build_processing_options(input_docx, folder, load_gui_settings())
         self._set_running(True)
-        self._append_log(f"Converting {input_docx.name}\n")
-        self._append_log(f"Output folder: {folder}\n")
-        thread = threading.Thread(
-            target=self._run_worker,
-            args=(options, folder),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            self._append_log(f"Converting {input_docx.name}\n")
+            self._append_log(f"Output folder: {folder}\n")
+            thread = threading.Thread(
+                target=self._run_worker,
+                args=(options, folder),
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            self._set_running(False)
+            raise
 
     def _run_worker(self, options: ProcessingOptions, folder: Path) -> None:
         try:
@@ -576,26 +626,32 @@ class PubMateGUI:
             self.root.after(100, self._poll_queue)
 
     def _handle_result(self, result: ProcessingResult, folder: Path) -> None:
-        self._set_running(False)
-        self.status.set("Finished." if result.exit_code == 0 else "Finished with errors.")
+        self.status.set(
+            "Finished." if result.exit_code == 0 else "Finished with errors."
+        )
         for message in result.messages:
             self._append_log(message + "\n")
         self._reveal_if_populated(folder)
         self._clean_old_folders()
+        self._set_running(False)
         if result.exit_code != 0:
-            detail = "\n".join(result.messages) or f"Conversion failed ({result.exit_code})."
+            detail = (
+                "\n".join(result.messages)
+                or f"Conversion failed ({result.exit_code})."
+            )
             messagebox.showerror("PubMate error", detail, parent=self.root)
 
     def _handle_error(self, message: str, folder: Path) -> None:
-        self._set_running(False)
         self.status.set("Unexpected error.")
         self._append_log(message + "\n")
         self._reveal_if_populated(folder)
         self._clean_old_folders()
+        self._set_running(False)
         messagebox.showerror("PubMate error", message, parent=self.root)
 
     def _set_running(self, running: bool) -> None:
         self._running = running
+        sparkle.set_busy(running)
         if running:
             self.status.set("Running…")
         cursor = "watch" if running else "hand2"
@@ -685,6 +741,7 @@ def run(initial_docx: Path | None = None) -> int:
         return 2
     root, dnd_available = create_root()
     application = PubMateGUI(root, dnd_available)
+    root.after(0, sparkle.start)
     if initial_docx is not None:
         root.after(0, application.start_conversion, initial_docx)
     root.mainloop()

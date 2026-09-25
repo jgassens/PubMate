@@ -9,7 +9,6 @@ import subprocess
 import sys
 import traceback
 
-from pmid2endnote import sparkle
 from pmid2endnote.settings import get_saved_email
 
 
@@ -21,17 +20,17 @@ EMAIL_PROMPT = (
 )
 MISSING_EMAIL_MESSAGE = "PubMate needs an NCBI email address to fetch PubMed records."
 
+_dup2 = os.dup2
+_close = os.close
+
 
 def _disable_tk_console_for_frozen_macos() -> bool:
     """Prevent Tk from creating its unused hidden console in the app bundle."""
 
     if not (sys.platform == "darwin" and getattr(sys, "frozen", False)):
         return False
-    try:
-        if os.isatty(0):
-            return False
-    except OSError:
-        pass
+    if os.isatty(0):
+        return False
 
     # Tk 8.6.13 creates a console when TK_CONSOLE is set or non-tty fd 0 is a
     # zero-block character device (Finder supplies /dev/null). A pipe is neither.
@@ -40,14 +39,14 @@ def _disable_tk_console_for_frozen_macos() -> bool:
     write_fd: int | None = None
     try:
         read_fd, write_fd = os.pipe()
-        os.dup2(read_fd, 0)
+        _dup2(read_fd, 0)
     except OSError:
         return False
     finally:
         for fd in (read_fd, write_fd):
             if fd is not None and fd != 0:
                 try:
-                    os.close(fd)
+                    _close(fd)
                 except OSError:
                     pass
     return True
@@ -66,14 +65,6 @@ def main(argv: list[str] | None = None) -> int:
     if "--self-test" in args:
         print(SELF_TEST_MESSAGE)
         return 0
-
-    if "--sparkle-self-test" in args:
-        print(sparkle.validate_sparkle_runtime())
-        return 0
-
-    sparkle_warning = sparkle.initialize_sparkle_updater()
-    if sparkle_warning:
-        print(sparkle_warning, file=sys.stderr)
 
     input_docx, launch_error = _docx_from_launch_args(args)
     if launch_error:

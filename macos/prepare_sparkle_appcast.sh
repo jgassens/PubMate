@@ -34,11 +34,11 @@ fi
 
 find_generate_appcast() {
   if [[ -n "$SPARKLE_GENERATE_APPCAST" ]]; then
-    if [[ -x "$SPARKLE_GENERATE_APPCAST" ]]; then
+    if [[ -f "$SPARKLE_GENERATE_APPCAST" && -x "$SPARKLE_GENERATE_APPCAST" ]]; then
       print -r -- "$SPARKLE_GENERATE_APPCAST"
       return 0
     fi
-    echo "error: SPARKLE_GENERATE_APPCAST is not executable: $SPARKLE_GENERATE_APPCAST" >&2
+    echo "error: SPARKLE_GENERATE_APPCAST is not an executable file: $SPARKLE_GENERATE_APPCAST" >&2
     return 1
   fi
 
@@ -54,7 +54,7 @@ find_generate_appcast() {
   )
 
   for candidate in "${candidates[@]}"; do
-    if [[ -x "$candidate" ]]; then
+    if [[ -f "$candidate" && -x "$candidate" ]]; then
       print -r -- "$candidate"
       return 0
     fi
@@ -78,7 +78,8 @@ mkdir -p "$UPDATES_DIR" "${APPCAST_OUTPUT:h}"
 ARCHIVE_NAME="${SPARKLE_ARCHIVE_NAME:-${DMG_PATH:t}}"
 ARCHIVE_PATH="$UPDATES_DIR/$ARCHIVE_NAME"
 ARCHIVE_BASE="${ARCHIVE_NAME:r}"
-rm -f "$UPDATES_DIR"/*.dmg(N) "$UPDATES_DIR"/*.delta(N) "$UPDATES_DIR"/appcast.xml
+find "$UPDATES_DIR" -maxdepth 1 -type f \
+  \( -name '*.dmg' -o -name '*.delta' -o -name 'appcast.xml' \) -delete
 ditto --norsrc --noextattr "$DMG_PATH" "$ARCHIVE_PATH"
 
 if [[ -n "$RELEASE_NOTES_PATH" ]]; then

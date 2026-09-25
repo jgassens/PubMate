@@ -12,10 +12,12 @@ def test_frozen_macos_launcher_replaces_non_tty_stdin_for_tk(monkeypatch) -> Non
     monkeypatch.setattr(macos_launcher.os, "isatty", lambda fd: False)
     monkeypatch.setattr(macos_launcher.os, "pipe", lambda: (11, 12))
     monkeypatch.setattr(
-        macos_launcher.os, "dup2", lambda source, target: calls.append(("dup2", source, target))
+        macos_launcher,
+        "_dup2",
+        lambda source, target: calls.append(("dup2", source, target)),
     )
     monkeypatch.setattr(
-        macos_launcher.os, "close", lambda fd: calls.append(("close", fd))
+        macos_launcher, "_close", lambda fd: calls.append(("close", fd))
     )
     monkeypatch.setenv("TK_CONSOLE", "1")
 
