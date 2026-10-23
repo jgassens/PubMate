@@ -648,7 +648,7 @@ def _nothing_converted_message(
             message += (
                 " Conversion of leftover citation wrappers is currently turned off. "
                 "Remove --no-convert-locked-citations, or tick \"Convert "
-                "PMID/DOI notes stuck inside existing EndNote citations\" in Settings."
+                "PMID/DOI notes stuck in leftover EndNote formatting\" in Settings."
                 " Real EndNote fields and other unsafe content remain protected."
             )
     return message

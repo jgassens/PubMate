@@ -2406,3 +2406,66 @@ def test_comment_wrapper_cannot_insert_into_real_endnote_field(
     assert scan.unique_pmids == []
     assert len(scan.skipped_identifiers) == 1
     assert scan.skipped_identifiers[0]["reason"] == "unsafe_comment_anchor"
+
+
+def _add_external_hyperlink(paragraph, visible_text: str) -> None:
+    """A link to a web page, as an author would write by hand."""
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), "rId99")
+    run = OxmlElement("w:r")
+    text = OxmlElement("w:t")
+    text.set(qn("xml:space"), "preserve")
+    text.text = visible_text
+    run.append(text)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def test_external_hyperlink_text_is_never_converted(tmp_path: Path) -> None:
+    """An author's own web link is not EndNote leftovers.
+
+    A link to a PubMed page can have the PMID as its visible text. Blanking
+    that would destroy a working link the author put there on purpose.
+    """
+
+    input_docx = tmp_path / "input.docx"
+    _locked_citation_docx(input_docx, _add_external_hyperlink, "(PMID: 12345678)")
+
+    result = scan_docx(input_docx, ReplacementOptions())
+
+    assert result.unique_pmids == []
+    assert any("field or hidden text" in warning for warning in result.warnings)
+
+
+def test_bare_identifier_in_wrapper_is_not_converted(tmp_path: Path) -> None:
+    """Opting into bare-DOI scanning must not widen wrapper editing.
+
+    Converting inside a wrapper is justified by "PMID:"/"DOI:" labels never
+    appearing in EndNote's own citation text. A bare DOI carries no such
+    guarantee, so it must stay out even when bare scanning is enabled.
+    """
+
+    input_docx = tmp_path / "input.docx"
+    _locked_citation_docx(input_docx, _add_codeless_field_shell, "10.1021/jacs.6b03673")
+
+    result = scan_docx(
+        input_docx,
+        ReplacementOptions(scan_bare_dois=True),
+    )
+
+    assert result.unique_identifiers == []
+
+
+def test_labeled_identifier_in_wrapper_still_converts_with_bare_scanning_on(
+    tmp_path: Path,
+) -> None:
+    input_docx = tmp_path / "input.docx"
+    _locked_citation_docx(input_docx, _add_codeless_field_shell, "(DOI: 10.1021/jacs.6b03673)")
+
+    result = scan_docx(
+        input_docx,
+        ReplacementOptions(scan_bare_dois=True),
+    )
+
+    assert result.unique_identifiers == [("doi", "10.1021/jacs.6b03673")]

@@ -716,7 +716,7 @@ def _partition_blocks_around_unsafe_content(
     non_text: list[TextRangeT] = []
     for block in blocks:
         if _range_overlaps_any(block.start, block.end, unsafe_ranges):
-            if _locked_wrapper_for_range(
+            if _block_is_explicitly_labeled(block) and _locked_wrapper_for_range(
                 locked_wrappers, text, block.start, block.end
             ) is not None and not _identifier_touches_omitted_content(
                 paragraph,
@@ -895,6 +895,11 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
             index += 1
         if any(record.depth_before or record.field_types for record in group):
             continue
+        # Only an internal cross-reference, which is what EndNote leaves
+        # behind. An author's own link to a web page can have a PMID as its
+        # visible text, and blanking that would destroy a working link.
+        if hyperlink.get(qn("w:anchor")) is None or hyperlink.get(qn("r:id")) is not None:
+            continue
         if any(
             child.tag != qn("w:r") and child.tag not in _HARMLESS_PARAGRAPH_MARKERS
             for child in hyperlink
@@ -994,6 +999,27 @@ def _codeless_field_wrapper(
         runs=tuple(runs),
         insert_after=end_record.run._r,
         kind="codeless_field",
+    )
+
+
+_LABELED_IDENTIFIER_SOURCES = frozenset({"labeled", "doi_label", "doi_url"})
+
+
+def _block_is_explicitly_labeled(block: Any) -> bool:
+    """Return whether every identifier in a block carried its own label.
+
+    Converting inside a wrapper is safe because "PMID:"/"DOI:" labels never
+    appear in EndNote's own formatted citation text. A bare DOI or a bare
+    parenthetical number carries no such guarantee, so opting into those
+    scans must not also widen what may be edited inside a wrapper.
+    """
+
+    identifier_blocks = getattr(block, "blocks", None)
+    if not identifier_blocks:
+        return False
+    return all(
+        identifier_block.source in _LABELED_IDENTIFIER_SOURCES
+        for identifier_block in identifier_blocks
     )
 
 

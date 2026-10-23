@@ -266,7 +266,7 @@ class SettingsDialog:
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Checkbutton(
             frame,
-            text="Convert PMID/DOI notes stuck inside existing EndNote citations",
+            text="Convert PMID/DOI notes stuck in leftover EndNote formatting",
             variable=self.convert_locked_citations,
         ).grid(row=7, column=0, columnspan=2, sticky="w", pady=2)
 

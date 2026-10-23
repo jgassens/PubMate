@@ -71,8 +71,12 @@ just outside the wrapper, as ordinary manuscript text, so EndNote reads it
 instead of treating it as a field result it may regenerate. The wrapper itself
 is left in place.
 
+Only an internal bibliography link qualifies, never an author's own link to a
+web page, and only identifiers that carried an explicit `PMID:`/`DOI:` label,
+never a bare one found through `--scan-bare-dois`.
+
 Pass `--no-convert-locked-citations`, or clear "Convert PMID/DOI notes stuck
-inside existing EndNote citations" in the macOS app's Settings, to leave them
+in leftover EndNote formatting" in the macOS app's Settings, to leave them
 alone. When identifiers are found but not converted, PubMate reports how many
 and why rather than reporting that none were found.
 
