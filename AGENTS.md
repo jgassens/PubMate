@@ -39,6 +39,16 @@ Python, runs the tests, signs, notarizes, staples, verifies the app inside the
 DMG, publishes the release, regenerates `docs/appcast.xml`, and commits the
 appcast to the default branch.
 
+Set those secrets up in one pass by running this on the Mac that already
+builds releases by hand:
+
+```bash
+macos/setup_ci_secrets.sh
+```
+
+It reads the Developer ID certificate, the Sparkle key and the notarization
+key, verifies each one works before uploading, and never prints a value.
+
 It needs these repository secrets: `MACOS_CERTIFICATE_P12`,
 `MACOS_CERTIFICATE_PASSWORD`, `MACOS_CODESIGN_IDENTITY`,
 `MACOS_NOTARY_KEY_P8`, `MACOS_NOTARY_KEY_ID`, `MACOS_NOTARY_ISSUER`, and
