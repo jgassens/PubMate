@@ -58,6 +58,20 @@ step "Checking this machine"
   || die "This has to run on your Mac; the keys live in its Keychain."
 ok "macOS"
 
+# Reading a key out of the Keychain, and exporting the certificate through
+# Keychain Access, both need a desktop session that can show an Allow dialog.
+# Over SSH those prompts have nowhere to appear and quietly fail instead.
+if [[ -n "${SSH_CONNECTION:-}${SSH_TTY:-}${SSH_CLIENT:-}" ]]; then
+  die "This looks like an SSH session.
+
+Reading the Sparkle key and exporting the certificate both make macOS ask
+for permission, and that prompt cannot be shown over SSH, so it fails with
+no explanation.
+
+Run this while sitting at the Mac, or through Screen Sharing."
+fi
+ok "running on a desktop session"
+
 if ! command -v gh >/dev/null 2>&1; then
   die "The GitHub CLI is not installed. Install it, then re-run:
 
