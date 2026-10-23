@@ -210,6 +210,30 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$mount_point/PubMate.app"
           spctl --assess --type execute --verbose "$mount_point/PubMate.app"
 
+          # Prove the shipped binary is universal rather than trusting the
+          # build target. An Apple Silicon-only DMG installs fine on this
+          # runner and fails only on the Intel Macs it was meant to serve,
+          # which is exactly the failure nobody here would see.
+          app_binary="$mount_point/PubMate.app/Contents/MacOS/PubMate"
+          archs="$(lipo -archs "$app_binary")"
+          echo "PubMate binary architectures: $archs"
+          for required in arm64 x86_64; do
+            case " $archs " in
+              *" $required "*) ;;
+              *)
+                echo "::error::Shipped binary is missing $required (has: $archs)."
+                echo "A universal2 release must carry both slices."
+                exit 1
+                ;;
+            esac
+          done
+
+          python_lib="$(find "$mount_point/PubMate.app/Contents/Frameworks" \
+            -maxdepth 2 -name 'Python' -type f 2>/dev/null | head -1)"
+          if [[ -n "$python_lib" ]]; then
+            echo "Bundled Python runtime: $(lipo -archs "$python_lib")"
+          fi
+
       - name: Publish the GitHub release
         if: github.ref_type == 'tag' || inputs.publish
         env:
