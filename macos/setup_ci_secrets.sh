@@ -239,13 +239,27 @@ step "Finding your notarization key"
 
 NOTARY_P8=""
 typeset -a candidates
-candidates=("${(@f)$(find "$HOME/private_keys" "$HOME/Downloads" "$HOME/Desktop" \
-  -maxdepth 1 -name 'AuthKey_*.p8' -type f 2>/dev/null || true)}")
+# notarytool's documented spots, the usual download folders, and whatever
+# hidden folder the key was stashed in. Library is skipped so this stays fast.
+candidates=("${(@f)$(find "$HOME" -maxdepth 4 -name '*.p8' -type f \
+  -not -path '*/Library/*' -not -path '*/.Trash/*' 2>/dev/null || true)}")
 candidates=("${(@)candidates:#}")
 
-if (( ${#candidates[@]} >= 1 )); then
+if (( ${#candidates[@]} == 1 )); then
   NOTARY_P8="${candidates[1]}"
-  ok "found: ${NOTARY_P8:t}"
+  ok "found: $NOTARY_P8"
+elif (( ${#candidates[@]} > 1 )); then
+  bold "  Found more than one key file:"
+  local n=1
+  for candidate in "${candidates[@]}"; do
+    print "    $n) $candidate"
+    (( n++ ))
+  done
+  local pick=""
+  ask "Which number should releases use?" pick
+  NOTARY_P8="${candidates[$pick]}"
+  [[ -n "$NOTARY_P8" && -f "$NOTARY_P8" ]] || die "That was not one of the choices."
+  ok "using: $NOTARY_P8"
 else
   warn "No AuthKey_*.p8 found."
   print "  Notarizing from a server needs an App Store Connect API key. A saved
