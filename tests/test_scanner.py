@@ -1,3 +1,5 @@
+import pytest
+
 from pmid2endnote.scanner import extract_unique_pmids, normalize_doi, scan_text
 
 
@@ -125,3 +127,25 @@ def test_doi_in_semicolon_separated_list_drops_the_separator() -> None:
 
     dois = [identifier for block in blocks for identifier in block.dois]
     assert dois == ["10.1021/jacs.6b03673"]
+
+
+@pytest.mark.parametrize("suffix", ["example;", "example%3B"])
+def test_doi_normalization_preserves_terminal_semicolons(suffix: str) -> None:
+    assert normalize_doi(f"10.5555/{suffix}") == "10.5555/example;"
+
+
+@pytest.mark.parametrize("prefix", ["DOI: ", "https://doi.org/", ""])
+@pytest.mark.parametrize("suffix", ["example;", "example%3B"])
+def test_doi_scan_preserves_terminal_semicolon_and_offsets(prefix: str, suffix: str) -> None:
+    text = f"Before {prefix}10.5555/{suffix} after."
+    blocks = scan_text(text, scan_bare_dois=True)
+    assert len(blocks) == 1
+    assert blocks[0].dois == ("10.5555/example;",)
+    assert blocks[0].original_text == f"{prefix}10.5555/{suffix}"
+    assert text[blocks[0].start : blocks[0].end] == blocks[0].original_text
+
+
+def test_encoded_terminal_semicolon_is_not_a_list_separator() -> None:
+    blocks = scan_text("(DOI: 10.5555/example%3B; PMID: 12345678)")
+    assert blocks[0].dois == ("10.5555/example;",)
+    assert blocks[0].original_text == "DOI: 10.5555/example%3B"

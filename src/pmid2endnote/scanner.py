@@ -81,7 +81,7 @@ DOI_URL_RE = re.compile(
 
 BARE_DOI_RE = re.compile(rf"(?<![A-Za-z0-9/])(?P<doi>{DOI_CORE_RE})", re.IGNORECASE)
 
-TRAILING_EXTERNAL_PUNCTUATION = ".,;"
+TRAILING_EXTERNAL_PUNCTUATION = ".,"
 
 
 @dataclass(frozen=True)
@@ -134,8 +134,16 @@ def _strip_external_doi_punctuation(doi: str) -> str:
     return doi
 
 
-def _external_doi_suffix_length(raw_doi: str) -> int:
+def _external_doi_suffix_length(raw_doi: str, following_text: str = "") -> int:
     stripped = _strip_external_doi_punctuation(raw_doi)
+    # Semicolons are legal DOI suffix characters, including at the end.
+    # Treat a literal semicolon as punctuation only between explicit notes;
+    # a percent-encoded semicolon always belongs to the identifier.
+    if raw_doi.endswith(";") and any(
+        regex.match(following_text.lstrip())
+        for regex in (PMID_BLOCK_RE, DOI_LABELED_RE, DOI_URL_RE)
+    ):
+        stripped = stripped[:-1]
     return len(raw_doi) - len(stripped)
 
 
@@ -194,8 +202,8 @@ def _doi_blocks(text: str, *, scan_bare_dois: bool) -> list[IdentifierBlock]:
     for regex, source in ((DOI_LABELED_RE, "doi_label"), (DOI_URL_RE, "doi_url")):
         for match in regex.finditer(text):
             raw_doi = match.group("doi")
-            normalized = normalize_doi(raw_doi)
-            suffix_len = _external_doi_suffix_length(raw_doi)
+            suffix_len = _external_doi_suffix_length(raw_doi, text[match.end() :])
+            normalized = normalize_doi(raw_doi[: len(raw_doi) - suffix_len])
             end = match.end() - suffix_len
             blocks.append(
                 IdentifierBlock(
@@ -211,8 +219,8 @@ def _doi_blocks(text: str, *, scan_bare_dois: bool) -> list[IdentifierBlock]:
     if scan_bare_dois:
         for match in BARE_DOI_RE.finditer(text):
             raw_doi = match.group("doi")
-            normalized = normalize_doi(raw_doi)
-            suffix_len = _external_doi_suffix_length(raw_doi)
+            suffix_len = _external_doi_suffix_length(raw_doi, text[match.end() :])
+            normalized = normalize_doi(raw_doi[: len(raw_doi) - suffix_len])
             end = match.end() - suffix_len
             blocks.append(
                 IdentifierBlock(
