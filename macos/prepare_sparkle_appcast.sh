@@ -27,6 +27,7 @@ APPCAST_OUTPUT="${APPCAST_OUTPUT:-$PROJECT_DIR/docs/appcast.xml}"
 DOWNLOAD_URL_PREFIX="${DOWNLOAD_URL_PREFIX:-https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_RELEASE_TAG}"
 RELEASE_NOTES_PATH="${RELEASE_NOTES_PATH:-}"
 SPARKLE_GENERATE_APPCAST="${SPARKLE_GENERATE_APPCAST:-}"
+SPARKLE_ED_KEY_FILE="${SPARKLE_ED_KEY_FILE:-}"
 
 if [[ "$DOWNLOAD_URL_PREFIX" != */ ]]; then
   DOWNLOAD_URL_PREFIX="$DOWNLOAD_URL_PREFIX/"
@@ -90,9 +91,20 @@ if [[ -n "$RELEASE_NOTES_PATH" ]]; then
   cp "$RELEASE_NOTES_PATH" "$UPDATES_DIR/$ARCHIVE_BASE.${RELEASE_NOTES_PATH:e}"
 fi
 
-"$SPARKLE_GENERATE_APPCAST" \
-  --download-url-prefix "$DOWNLOAD_URL_PREFIX" \
-  "$UPDATES_DIR"
+APPCAST_ARGS=(--download-url-prefix "$DOWNLOAD_URL_PREFIX")
+
+# generate_appcast reads the EdDSA signing key from the login Keychain by
+# default. A build machine without that Keychain entry, such as CI, points
+# SPARKLE_ED_KEY_FILE at the exported private key instead.
+if [[ -n "$SPARKLE_ED_KEY_FILE" ]]; then
+  if [[ ! -f "$SPARKLE_ED_KEY_FILE" ]]; then
+    echo "error: Sparkle EdDSA key file not found: $SPARKLE_ED_KEY_FILE" >&2
+    exit 1
+  fi
+  APPCAST_ARGS+=(--ed-key-file "$SPARKLE_ED_KEY_FILE")
+fi
+
+"$SPARKLE_GENERATE_APPCAST" "${APPCAST_ARGS[@]}" "$UPDATES_DIR"
 
 if [[ ! -f "$UPDATES_DIR/appcast.xml" ]]; then
   echo "error: generate_appcast did not create $UPDATES_DIR/appcast.xml" >&2

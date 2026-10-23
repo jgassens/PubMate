@@ -1,0 +1,285 @@
+name: Release macOS
+
+# Builds, signs, notarizes and publishes a PubMate release.
+#
+# Push a tag that matches the pyproject version to cut a release:
+#   git tag v0.2.4 && git push origin v0.2.4
+#
+# Required repository secrets:
+#   MACOS_CERTIFICATE_P12       Developer ID Application certificate and key,
+#                               exported as .p12 then base64 encoded.
+#   MACOS_CERTIFICATE_PASSWORD  Password set when exporting that .p12.
+#   MACOS_CODESIGN_IDENTITY     e.g. "Developer ID Application: NAME (TEAMID)".
+#   MACOS_NOTARY_KEY_P8         App Store Connect API key (.p8), base64 encoded.
+#   MACOS_NOTARY_KEY_ID         That key's Key ID.
+#   MACOS_NOTARY_ISSUER         App Store Connect Issuer ID.
+#   SPARKLE_ED_PRIVATE_KEY      Sparkle EdDSA private key from generate_keys.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the release and commit the appcast"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Latest 3.12 with a universal2 installer. The build requires a universal
+  # Python; the runner's own Python is Apple Silicon only and is rejected.
+  UNIVERSAL_PYTHON_VERSION: "3.12.10"
+  MACOS_TARGET_ARCH: universal2
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check required secrets are present
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+          SPARKLE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in CERT CERT_PASSWORD IDENTITY NOTARY_KEY NOTARY_KEY_ID \
+                      NOTARY_ISSUER SPARKLE_KEY; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing repository secrets: ${missing[*]}"
+            echo "See the comment at the top of this workflow for what each one holds."
+            exit 1
+          fi
+
+      - name: Resolve version and release tag
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "dmg=dist/PubMate-$version-macos-${MACOS_TARGET_ARCH}.dmg" >> "$GITHUB_OUTPUT"
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject version $version."
+            echo "Sparkle keys the update off the bundled version, so the two must agree."
+            exit 1
+          fi
+          echo "Releasing PubMate $version"
+
+      - name: Reject a version that is already published
+        # Skipped for a manual run so a release that failed partway can be
+        # retried without having to burn a version number.
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.version.outputs.tag }}'
+          if gh release view "$tag" --json assets \
+               --jq '.assets[].name' 2>/dev/null | grep -q '\.dmg$'; then
+            echo "::error::Release $tag already has a DMG attached."
+            echo "Bump the version in pyproject.toml; Sparkle will not offer a rebuilt same-version app."
+            echo "To retry this exact version, re-run from the Actions tab with 'publish' checked."
+            exit 1
+          fi
+
+      - name: Install universal2 Python
+        run: |
+          set -euo pipefail
+          pkg="python-${UNIVERSAL_PYTHON_VERSION}-macos11.pkg"
+          curl -fsSL -o "$RUNNER_TEMP/$pkg" \
+            "https://www.python.org/ftp/python/${UNIVERSAL_PYTHON_VERSION}/$pkg"
+          sudo installer -pkg "$RUNNER_TEMP/$pkg" -target /
+          series="${UNIVERSAL_PYTHON_VERSION%.*}"
+          framework="/Library/Frameworks/Python.framework/Versions/$series/bin/python$series"
+          echo "FRAMEWORK_PYTHON=$framework" >> "$GITHUB_ENV"
+          # The build refuses a runtime that is not both arm64 and x86_64.
+          lipo -archs "$framework"
+
+      - name: Create the universal build environment
+        run: |
+          set -euo pipefail
+          "$FRAMEWORK_PYTHON" -m venv .venv-universal
+          .venv-universal/bin/python -m pip install --upgrade pip
+          .venv-universal/bin/python -m pip install -e ".[test,macos]"
+
+      - name: Run tests
+        run: .venv-universal/bin/python -m pytest -q
+
+      - name: Import the Developer ID certificate
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/pubmate-build.keychain-db"
+          password="$(uuidgen)"
+          echo "BUILD_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+
+          printf '%s' "$CERT" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -k "$keychain" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/certificate.p12"
+
+          # Let codesign use the key without an interactive prompt.
+          security set-key-partition-list \
+            -S 'apple-tool:,apple:,codesign:' -s -k "$password" "$keychain" >/dev/null
+
+          # Keep the login keychain in the search list so system roots resolve.
+          security list-keychains -d user -s "$keychain" \
+            $(security list-keychains -d user | tr -d '"')
+
+          echo "Signing identities available:"
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Build the signed app and DMG
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          export PYTHON="$PWD/.venv-universal/bin/python"
+          macos/build_distribution.sh
+
+      - name: Notarize and staple the DMG
+        env:
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+          NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          export MACOS_NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          trap 'rm -f "$RUNNER_TEMP/notary.p8"' EXIT
+          macos/notarize_distribution.sh '${{ steps.version.outputs.dmg }}'
+
+      - name: Verify the signature and ticket
+        run: |
+          set -euo pipefail
+          dmg='${{ steps.version.outputs.dmg }}'
+          xcrun stapler validate "$dmg"
+          codesign --verify --deep --strict --verbose=2 dist/PubMate.app
+          # The app inside the DMG is the artifact that ships.
+          mount_point="$(mktemp -d)"
+          hdiutil attach "$dmg" -nobrowse -quiet -mountpoint "$mount_point"
+          trap 'hdiutil detach "$mount_point" -quiet || true' EXIT
+          codesign --verify --deep --strict --verbose=2 "$mount_point/PubMate.app"
+          spctl --assess --type execute --verbose "$mount_point/PubMate.app"
+
+      - name: Publish the GitHub release
+        if: github.ref_type == 'tag' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.version.outputs.tag }}'
+          dmg='${{ steps.version.outputs.dmg }}'
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --title "PubMate ${{ steps.version.outputs.version }}" \
+              --generate-notes
+          fi
+          gh release upload "$tag" "$dmg" --clobber
+
+      - name: Regenerate the Sparkle appcast
+        if: github.ref_type == 'tag' || inputs.publish
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          GITHUB_RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle_ed_key"
+          chmod 600 "$RUNNER_TEMP/sparkle_ed_key"
+          export SPARKLE_ED_KEY_FILE="$RUNNER_TEMP/sparkle_ed_key"
+          trap 'rm -f "$RUNNER_TEMP/sparkle_ed_key"' EXIT
+          export PYTHON="$PWD/.venv-universal/bin/python"
+          macos/prepare_sparkle_appcast.sh
+
+          grep -q 'sparkle:edSignature' docs/appcast.xml \
+            || { echo "::error::Appcast has no EdDSA signature."; exit 1; }
+          grep -q '${{ steps.version.outputs.version }}' docs/appcast.xml \
+            || { echo "::error::Appcast does not advertise this version."; exit 1; }
+
+      - name: Commit the appcast to the default branch
+        if: github.ref_type == 'tag' || inputs.publish
+        run: |
+          set -euo pipefail
+          branch='${{ github.event.repository.default_branch }}'
+          cp docs/appcast.xml "$RUNNER_TEMP/appcast.xml"
+
+          git fetch origin "$branch"
+          git checkout "$branch"
+          git pull --ff-only origin "$branch"
+          cp "$RUNNER_TEMP/appcast.xml" docs/appcast.xml
+          git add docs/appcast.xml
+
+          if git diff --cached --quiet; then
+            echo "Appcast already current; nothing to commit."
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'Update Sparkle appcast for ${{ steps.version.outputs.tag }}'
+          git push origin "$branch"
+
+      - name: Confirm the published appcast is live
+        if: github.ref_type == 'tag' || inputs.publish
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # GitHub Pages lags a commit by a minute or two.
+          for attempt in $(seq 1 10); do
+            if curl -fsSL https://jgassens.github.io/PubMate/appcast.xml \
+                 | grep -q '${{ steps.version.outputs.version }}'; then
+              echo "Live appcast advertises ${{ steps.version.outputs.version }}."
+              exit 0
+            fi
+            echo "Attempt $attempt: not published yet; waiting."
+            sleep 30
+          done
+          echo "::warning::Live appcast does not list this version yet. Re-check Pages."
+
+      - name: Upload the DMG as a build artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PubMate-${{ steps.version.outputs.version }}-macos-universal2
+          path: dist/*.dmg
+          if-no-files-found: warn
+
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${BUILD_KEYCHAIN:-}" && -f "$BUILD_KEYCHAIN" ]]; then
+            security list-keychains -d user -s \
+              $(security list-keychains -d user | tr -d '"' | grep -v "$BUILD_KEYCHAIN" || true)
+            security delete-keychain "$BUILD_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/sparkle_ed_key" \
+                "$RUNNER_TEMP/certificate.p12" || true

@@ -1,0 +1,83 @@
+name: Tests
+
+# Fast checks on every push and pull request. No signing secrets are used
+# here, so a release never fails on something this job could have caught.
+
+on:
+  push:
+    branches-ignore:
+      - "gh-pages"
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Run tests
+        # The GUI and macOS packaging suites need tkinter, zsh and Xcode.
+        # They run on the macOS job instead.
+        run: >-
+          python -m pytest -q
+          --ignore=tests/test_gui.py
+          --ignore=tests/test_macos_distribution.py
+          --ignore=tests/test_sparkle.py
+
+  macos-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Run the full suite
+        run: python -m pytest -q
+
+  version-guard:
+    # A releasable change must not reuse the published version, or Sparkle
+    # will never offer the build. Advisory on pull requests only.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the project version with the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          published="$(gh release view --json tagName --jq .tagName 2>/dev/null || echo "none")"
+          echo "pyproject version: $version"
+          echo "latest release:    $published"
+          if [[ "v$version" == "$published" ]]; then
+            echo "::warning::Version $version is already published as $published. Bump pyproject.toml before releasing an app change."
+          fi

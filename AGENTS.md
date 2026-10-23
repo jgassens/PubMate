@@ -23,7 +23,34 @@ the new build.
 Documentation-only commits may keep the version unchanged only when they do not
 need to ship as a new app update.
 
+## Releasing Through GitHub Actions
+
+`.github/workflows/release-macos.yml` performs the whole checklist below on a
+GitHub macOS runner. Bump the version, then push the matching tag:
+
+```bash
+git tag v$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+git push origin --tags
+```
+
+The workflow refuses to run if the tag and `pyproject.toml` version disagree,
+or if that version already has a published DMG. It installs a universal2
+Python, runs the tests, signs, notarizes, staples, verifies the app inside the
+DMG, publishes the release, regenerates `docs/appcast.xml`, and commits the
+appcast to the default branch.
+
+It needs these repository secrets: `MACOS_CERTIFICATE_P12`,
+`MACOS_CERTIFICATE_PASSWORD`, `MACOS_CODESIGN_IDENTITY`,
+`MACOS_NOTARY_KEY_P8`, `MACOS_NOTARY_KEY_ID`, `MACOS_NOTARY_ISSUER`, and
+`SPARKLE_ED_PRIVATE_KEY`. The two `_P12`/`_P8` values are base64 encoded.
+
+Set `SPARKLE_ED_KEY_FILE` to sign an appcast on a machine whose Keychain has
+no Sparkle key; `prepare_sparkle_appcast.sh` otherwise reads the Keychain as
+before, so local releases are unchanged.
+
 ## Release Checklist For App Changes
+
+Run these by hand only when releasing without the workflow.
 
 1. Bump `pyproject.toml` version.
 2. Run tests:
