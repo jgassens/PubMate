@@ -59,11 +59,8 @@ wrappers around its text: bibliography cross-reference links, and complex Word
 fields left behind without any field code. A PMID or DOI note typed next to one
 of these can end up inside it.
 
-By default PubMate refuses to edit inside any field or link, because editing a
-real citation can damage it. Those notes are reported as skipped with a
-`field or hidden text content` warning and are left alone.
-
-Conversion is on by default. A note only qualifies when:
+PubMate converts those notes by default. It still refuses to edit a real
+citation, so a note only qualifies when:
 
 - its wrapper is a hyperlink, or a field carrying **no** field instruction, and
 - the note is the entire visible text of that wrapper.

@@ -367,7 +367,8 @@ def test_nothing_converted_message_reports_what_was_found(tmp_path: Path) -> Non
     message = " ".join(result.messages)
     assert "Found 1 PMID/DOI identifier but converted none" in message
     assert "inside an existing EndNote citation or link" in message
-    assert "--convert-locked-citations" in message
+    assert "--no-convert-locked-citations" in message
+    assert "currently\n        turned off" not in message  # single-line phrasing
     assert "No matching PMID or DOI blocks were found" not in message
 
 

@@ -625,10 +625,13 @@ def _nothing_converted_message(skipped_identifiers: list[dict[str, Any]]) -> str
         + ". No Word or EndNote files were written."
     )
     if counts.get("locked_citation"):
+        # This conversion is on by default, so reaching here means it was
+        # switched off. Telling the user to enable a feature they already
+        # have sends them looking in the wrong place.
         message += (
-            " Identifiers inside existing EndNote citations are only converted when "
-            "\"Convert PMID/DOI notes stuck inside existing EndNote citations\" is enabled "
-            "(--convert-locked-citations)."
+            " Converting identifiers inside existing EndNote citations is currently "
+            "turned off. Remove --no-convert-locked-citations, or tick \"Convert "
+            "PMID/DOI notes stuck inside existing EndNote citations\" in Settings."
         )
     return message
 
