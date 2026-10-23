@@ -158,6 +158,25 @@ jobs:
           echo "Signing identities available:"
           security find-identity -v -p codesigning "$keychain"
 
+      - name: Build the Sparkle framework
+        # Sparkle arrives as a binary artifact of a Swift package. A fresh
+        # clone has no .build directory, so both the framework the app embeds
+        # and the generate_appcast tool the appcast step needs are missing
+        # until this runs. A local checkout usually has them already.
+        run: |
+          set -euo pipefail
+          swift build --package-path macos/SparkleSupport -c release
+
+          framework="macos/SparkleSupport/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+          if [[ ! -d "$framework" ]]; then
+            echo "::error::Sparkle.framework is still missing at $framework"
+            find macos/SparkleSupport/.build -maxdepth 8 -name 'Sparkle.framework' 2>/dev/null || true
+            exit 1
+          fi
+          echo "Sparkle.framework: $framework"
+          lipo -archs "$framework/Versions/A/Sparkle" 2>/dev/null || true
+          ls -l macos/SparkleSupport/.build/artifacts/sparkle/Sparkle/bin/generate_appcast 2>/dev/null || true
+
       - name: Build the signed app and DMG
         env:
           MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
