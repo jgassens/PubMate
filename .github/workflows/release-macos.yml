@@ -200,7 +200,10 @@ jobs:
           tag='${{ steps.version.outputs.tag }}'
           dmg='${{ steps.version.outputs.dmg }}'
           if ! gh release view "$tag" >/dev/null 2>&1; then
+            # Target the exact commit that produced this DMG, so a manual run
+            # from a branch cannot tag something that was never built.
             gh release create "$tag" \
+              --target "$GITHUB_SHA" \
               --title "PubMate ${{ steps.version.outputs.version }}" \
               --generate-notes
           fi
