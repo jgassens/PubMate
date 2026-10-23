@@ -369,7 +369,7 @@ def test_nothing_converted_message_reports_what_was_found(tmp_path: Path) -> Non
 
     message = " ".join(result.messages)
     assert "Found 1 PMID/DOI identifier but converted none" in message
-    assert "inside an existing EndNote citation or link" in message
+    assert "inside a Word field, hyperlink, or hidden text" in message
     assert "--no-convert-locked-citations" in message
     assert "No matching PMID or DOI blocks were found" not in message
 
@@ -435,7 +435,7 @@ def test_real_endnote_citation_skip_does_not_blame_a_setting(tmp_path: Path) -> 
 
     message = " ".join(result.messages)
     assert "Found 1 PMID/DOI identifier but converted none" in message
-    assert "cannot be converted without damaging them" in message
+    assert "could not safely separate" in message
     assert "currently turned off" not in message
     assert "--no-convert-locked-citations" not in message
 
@@ -520,3 +520,45 @@ def test_linked_header_or_footer_is_counted_once(tmp_path: Path, story: str) -> 
 
     assert len(result.report["skipped_identifiers"]) == 1
     assert "Found 1 PMID/DOI identifier but converted none" in " ".join(result.messages)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_locked_skip_message_does_not_assume_endnote_ownership(
+    tmp_path: Path, enabled: bool,
+) -> None:
+    input_docx = tmp_path / "input.docx"
+    _codeless_field_docx(input_docx, "See (PMID: 12345678) for details")
+    result = process_document(ProcessingOptions(
+        input_docx=input_docx,
+        convert_locked_citations=enabled,
+        save_email=False,
+        write_report=False,
+        write_nbib=False,
+    ))
+
+    message = " ".join(result.messages)
+    assert "inside a Word field, hyperlink, or hidden text" in message
+    assert "citations EndNote owns" not in message
+    assert "cannot be converted without damaging" not in message
+    if enabled:
+        assert "could not safely separate" in message
+        assert "turned off" not in message
+    else:
+        assert "leftover citation wrappers is currently turned off" in message
+        assert "Real EndNote fields and other unsafe content remain protected" in message
+
+
+def test_nothing_converted_counts_mixed_reasons_and_pluralizes() -> None:
+    message = app._nothing_converted_message(
+        [{"reason": reason} for reason in (
+            "reference_section", "reference_section", "locked_citation",
+            "tracked_changes", "non_text_content", "unsafe_comment_anchor",
+        )],
+        convert_locked_citations=True,
+    )
+    assert "Found 6 PMID/DOI identifiers but converted none" in message
+    assert "2 in the document's reference section" in message
+    assert "1 inside a Word field, hyperlink, or hidden text" in message
+    assert "1 next to tracked changes or content controls" in message
+    assert "1 sharing a run with an image or page break" in message
+    assert "1 in comments without a safe document anchor" in message

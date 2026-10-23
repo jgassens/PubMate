@@ -597,7 +597,7 @@ def _dry_run_auxiliary_nbib_pmids(
 
 _SKIP_REASON_TEXT = {
     "reference_section": "in the document's reference section",
-    "locked_citation": "inside an existing EndNote citation or link",
+    "locked_citation": "inside a Word field, hyperlink, or hidden text",
     "tracked_changes": "next to tracked changes or content controls",
     "non_text_content": "sharing a run with an image or page break",
     "unsafe_comment_anchor": "in comments without a safe document anchor",
@@ -635,21 +635,21 @@ def _nothing_converted_message(
         + ". No Word or EndNote files were written."
     )
     if counts.get("locked_citation"):
-        # Whether a setting would help depends on the setting. With conversion
-        # already on, these sit in citations EndNote owns, or in hidden text,
-        # and no option converts them; naming one sends the user to a
-        # checkbox that is already ticked.
+        # Rejection can mean a real citation, hidden text, or a wrapper whose
+        # layout we cannot safely edit. Do not claim EndNote owns all of them.
         if convert_locked_citations:
+            note = "this note" if counts["locked_citation"] == 1 else "these notes"
+            pronoun = "it" if counts["locked_citation"] == 1 else "them"
             message += (
-                " These sit inside citations EndNote owns, or in hidden text, and "
-                "cannot be converted without damaging them. Move the note outside "
-                "the citation in Word and run PubMate again."
+                f" PubMate could not safely separate {note} from the surrounding Word "
+                f"markup. Move {pronoun} into ordinary visible text in Word and run PubMate again."
             )
         else:
             message += (
-                " Converting identifiers inside existing EndNote citations is currently "
-                "turned off. Remove --no-convert-locked-citations, or tick \"Convert "
+                " Conversion of leftover citation wrappers is currently turned off. "
+                "Remove --no-convert-locked-citations, or tick \"Convert "
                 "PMID/DOI notes stuck inside existing EndNote citations\" in Settings."
+                " Real EndNote fields and other unsafe content remain protected."
             )
     return message
 
