@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 from pmid2endnote import app
 from pmid2endnote.app import ProcessingOptions, process_document
@@ -435,3 +438,62 @@ def test_real_endnote_citation_skip_does_not_blame_a_setting(tmp_path: Path) -> 
     assert "cannot be converted without damaging them" in message
     assert "currently turned off" not in message
     assert "--no-convert-locked-citations" not in message
+
+
+@pytest.mark.parametrize(
+    "story, reason",
+    [(story, reason) for story in ("body", "header", "footer", "comment")
+     for reason in ("locked_citation", "tracked_changes", "non_text_content")
+     if (story, reason) != ("comment", "non_text_content")],
+)
+def test_rejected_identifiers_are_reported_in_every_scanned_story(
+    tmp_path: Path, story: str, reason: str,
+) -> None:
+    input_docx = tmp_path / "input.docx"
+    document = Document()
+    anchor = document.add_paragraph().add_run("Anchor text")
+    if story == "body":
+        paragraph = document.add_paragraph()
+    elif story == "comment":
+        paragraph = document.add_comment(anchor, text="", author="Reviewer").paragraphs[0]
+    else:
+        paragraph = getattr(document.sections[0], story).paragraphs[0]
+    if reason == "locked_citation":
+        paragraph.add_run("PMIDs: 12345678, 23456789").font.hidden = True
+        count = 2
+    elif reason == "tracked_changes":
+        paragraph.add_run("PMID: 123")
+        change = OxmlElement("w:ins")
+        change.set(qn("w:id"), "1")
+        run = OxmlElement("w:r")
+        text = OxmlElement("w:t")
+        text.text = "4"
+        run.append(text)
+        change.append(run)
+        paragraph._p.append(change)
+        paragraph.add_run("5678")
+        count = 1
+    else:
+        paragraph.add_run("PMID: 12345678")._r.append(OxmlElement("w:drawing"))
+        count = 1
+    document.save(input_docx)
+
+    result = process_document(ProcessingOptions(
+        input_docx=input_docx,
+        include_headers=True,
+        include_footers=True,
+        include_comments=True,
+        save_email=False,
+        write_report=False,
+        write_nbib=False,
+    ))
+
+    skipped = result.report["skipped_identifiers"]
+    assert len(skipped) == count
+    assert {entry["reason"] for entry in skipped} == {reason}
+    assert {entry["location"]["part"] for entry in skipped} == {story}
+    message = " ".join(result.messages)
+    assert f"Found {count} PMID/DOI identifier{'s' if count > 1 else ''} but converted none" in message
+    assert "No matching PMID or DOI blocks were found" not in message
+    assert not result.output_docx.exists()
+    assert not result.enw_file.exists()

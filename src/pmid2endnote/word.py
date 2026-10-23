@@ -330,6 +330,14 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
                 warnings.append(
                     _tracked_change_warning(location, len(tracked_change_blocks))
                 )
+            skipped_identifiers.extend(
+                _skipped_replacement_reports(
+                    field_or_hidden_blocks,
+                    tracked_change_blocks,
+                    [],  # Comment text is read for insertion at its anchor.
+                    location,
+                )
+            )
             occurrences.extend(
                 DocumentPmidOccurrence(block=block, location=location)
                 for replacement_block in replacement_blocks
@@ -374,6 +382,14 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
             warnings.append(
                 _tracked_change_warning(location, len(tracked_change_blocks))
             )
+        skipped_identifiers.extend(
+            _skipped_replacement_reports(
+                field_or_hidden_blocks,
+                tracked_change_blocks,
+                non_text_blocks,
+                location,
+            )
+        )
         occurrences.extend(
             DocumentPmidOccurrence(block=block, location=location)
             for replacement_block in replacement_blocks
