@@ -81,7 +81,7 @@ DOI_URL_RE = re.compile(
 
 BARE_DOI_RE = re.compile(rf"(?<![A-Za-z0-9/])(?P<doi>{DOI_CORE_RE})", re.IGNORECASE)
 
-TRAILING_EXTERNAL_PUNCTUATION = ".,"
+TRAILING_EXTERNAL_PUNCTUATION = ".,;"
 
 
 @dataclass(frozen=True)

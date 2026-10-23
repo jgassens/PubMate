@@ -116,3 +116,12 @@ def test_doi_normalization_preserves_internal_punctuation() -> None:
     )
     assert normalize_doi("https://doi.org/10.5555/foo(bar);baz).") == "10.5555/foo(bar);baz"
     assert normalize_doi("DOI: 10.1021/acs.chemrev.3c00409]") == "10.1021/acs.chemrev.3c00409"
+
+
+def test_doi_in_semicolon_separated_list_drops_the_separator() -> None:
+    """A DOI followed by a list separator must not absorb the semicolon."""
+
+    blocks = scan_text("(PMID: 22168547; DOI: 10.1021/jacs.6b03673; PMID: 34546723)")
+
+    dois = [identifier for block in blocks for identifier in block.dois]
+    assert dois == ["10.1021/jacs.6b03673"]

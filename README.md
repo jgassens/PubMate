@@ -52,6 +52,31 @@ http://dx.doi.org/10.1002/anie.202000000
 
 Bare DOI scanning is available with `--scan-bare-dois`.
 
+## Notes Stuck Inside Existing EndNote Citations
+
+A manuscript that has already been formatted by EndNote carries leftover
+wrappers around its text: bibliography cross-reference links, and complex Word
+fields left behind without any field code. A PMID or DOI note typed next to one
+of these can end up inside it.
+
+By default PubMate refuses to edit inside any field or link, because editing a
+real citation can damage it. Those notes are reported as skipped with a
+`field or hidden text content` warning and are left alone.
+
+`--convert-locked-citations` converts them anyway. A note only qualifies when:
+
+- its wrapper is a hyperlink, or a field carrying **no** field instruction, and
+- the note is the entire visible text of that wrapper.
+
+A field holding a real ` ADDIN EN.CITE ` instruction is never touched, so
+citations EndNote owns cannot be altered. The temporary citation is written
+just outside the wrapper, as ordinary manuscript text, so EndNote reads it
+instead of treating it as a field result it may regenerate. The wrapper itself
+is left in place.
+
+In the macOS app the same option appears in Settings as "Convert PMID/DOI notes
+stuck inside existing EndNote citations".
+
 For manuscripts that use raw PMID placeholders, parenthetical scanning is available as an opt-in mode:
 
 ```text

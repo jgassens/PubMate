@@ -47,6 +47,7 @@ from pmid2endnote.settings import (
     get_retention_days,
     get_saved_email,
     get_scan_parenthetical_pmids,
+    get_convert_locked_citations,
     get_skip_reference_section,
     get_write_nbib,
     get_write_report,
@@ -100,6 +101,9 @@ def build_processing_options(
             settings_dict.get("scan_parenthetical_pmids", False)
         ),
         skip_reference_section=bool(settings_dict.get("skip_reference_section", True)),
+        convert_locked_citations=bool(
+            settings_dict.get("convert_locked_citations", False)
+        ),
         create_backup=False,
         **output_paths,
     )
@@ -137,6 +141,7 @@ def load_gui_settings() -> dict[str, object]:
         "retention_days": get_retention_days(),
         "scan_parenthetical_pmids": get_scan_parenthetical_pmids(),
         "skip_reference_section": get_skip_reference_section(),
+        "convert_locked_citations": get_convert_locked_citations(),
     }
 
 
@@ -207,6 +212,9 @@ class SettingsDialog:
         self.skip_reference_section = tk.BooleanVar(
             value=values["skip_reference_section"]
         )
+        self.convert_locked_citations = tk.BooleanVar(
+            value=values["convert_locked_citations"]
+        )
 
         frame = ttk.Frame(self.window, padding=18)
         frame.grid(row=0, column=0, sticky="nsew")
@@ -256,11 +264,16 @@ class SettingsDialog:
             text="Skip identifiers after a References heading",
             variable=self.skip_reference_section,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Checkbutton(
+            frame,
+            text="Convert PMID/DOI notes stuck inside existing EndNote citations",
+            variable=self.convert_locked_citations,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=2)
 
         self._build_update_controls(frame)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        buttons.grid(row=9, column=0, columnspan=2, sticky="e", pady=(16, 0))
         ttk.Button(buttons, text="Cancel", command=self._close).grid(
             row=0, column=0, padx=(0, 8)
         )
@@ -275,7 +288,7 @@ class SettingsDialog:
 
     def _build_update_controls(self, frame: object) -> None:
         updates = ttk.Frame(frame)
-        updates.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        updates.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         ttk.Label(updates, text=f"PubMate {__version__}").grid(
             row=0, column=0, sticky="w"
         )
@@ -319,6 +332,7 @@ class SettingsDialog:
                 "retention_days": self.retention_days.get(),
                 "scan_parenthetical_pmids": self.scan_parenthetical_pmids.get(),
                 "skip_reference_section": self.skip_reference_section.get(),
+                "convert_locked_citations": self.convert_locked_citations.get(),
             }
         )
         self.saved = True

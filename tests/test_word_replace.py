@@ -1355,7 +1355,7 @@ def test_unapplied_replacement_is_warned_and_not_reported(
     monkeypatch.setattr(
         word_module,
         "_replace_paragraph_range",
-        lambda paragraph, start, end, replacement: False,
+        lambda paragraph, start, end, replacement, **kwargs: False,
     )
 
     result = replace_pmids_in_docx(
@@ -1961,3 +1961,167 @@ def test_mixed_resolved_unresolved_wrapper_keeps_unresolved_outside_braces(
         _read_paragraph_text(output_docx)
         == "Before {Zhong, 2019, PMID-30826373} [unresolved DOI: 10.9999/unresolved] after."
     )
+
+
+def _add_codeless_field_shell(paragraph, visible_text: str) -> None:
+    """Add a leftover EndNote wrapper: a complex field with no instruction.
+
+    Previously formatted manuscripts contain these around author-typed text.
+    The nested empty field mirrors what Word actually leaves behind.
+    """
+
+    for _ in range(2):
+        begin = OxmlElement("w:fldChar")
+        begin.set(qn("w:fldCharType"), "begin")
+        paragraph.add_run()._r.append(begin)
+
+    nested_end = OxmlElement("w:fldChar")
+    nested_end.set(qn("w:fldCharType"), "end")
+    paragraph.add_run()._r.append(nested_end)
+
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    paragraph.add_run()._r.append(separate)
+    paragraph.add_run(visible_text)
+
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    paragraph.add_run()._r.append(end)
+
+
+def _add_bibliography_hyperlink(paragraph, visible_text: str) -> None:
+    """Add an EndNote bibliography cross-reference link around typed text."""
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("w:anchor"), "_ENREF_12")
+    run = OxmlElement("w:r")
+    text = OxmlElement("w:t")
+    text.set(qn("xml:space"), "preserve")
+    text.text = visible_text
+    run.append(text)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def _locked_citation_docx(path: Path, builder, visible_text: str) -> None:
+    document = Document()
+    paragraph = document.add_paragraph("Lead text. ")
+    builder(paragraph, visible_text)
+    paragraph.add_run(" Trailing text.")
+    document.save(path)
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [_add_codeless_field_shell, _add_bibliography_hyperlink],
+)
+def test_locked_identifier_is_skipped_by_default(tmp_path: Path, builder) -> None:
+    input_docx = tmp_path / "input.docx"
+    _locked_citation_docx(input_docx, builder, "(PMID: 12345678)")
+
+    result = scan_docx(input_docx, ReplacementOptions())
+
+    assert result.unique_pmids == []
+    assert any("field or hidden text" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [_add_codeless_field_shell, _add_bibliography_hyperlink],
+)
+def test_locked_identifier_is_converted_when_enabled(tmp_path: Path, builder) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    _locked_citation_docx(input_docx, builder, "(PMID: 12345678)")
+    options = ReplacementOptions(convert_locked_citations=True)
+
+    assert scan_docx(input_docx, options).unique_pmids == ["12345678"]
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Smith", "2024")},
+        options=options,
+    )
+
+    assert len(result.replacements) == 1
+    text = _read_paragraph_text(output_docx)
+    assert "{Smith, 2024, PMID-12345678}" in text
+    assert "PMID: 12345678" not in text
+    assert text.startswith("Lead text.")
+    assert text.endswith("Trailing text.")
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [_add_codeless_field_shell, _add_bibliography_hyperlink],
+)
+def test_locked_conversion_keeps_surrounding_word_markup(
+    tmp_path: Path,
+    builder,
+) -> None:
+    """The wrapper itself is left in place so no real citation is disturbed."""
+
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    _locked_citation_docx(input_docx, builder, "(PMID: 12345678)")
+
+    def _marker_counts(path: Path) -> tuple[int, int]:
+        body = etree.tostring(Document(path).element.body, encoding="unicode")
+        return body.count("w:fldChar"), body.count("<w:hyperlink")
+
+    before = _marker_counts(input_docx)
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Smith", "2024")},
+        options=ReplacementOptions(convert_locked_citations=True),
+    )
+
+    assert _marker_counts(output_docx) == before
+
+
+def test_real_endnote_citation_field_is_never_converted(tmp_path: Path) -> None:
+    """A field carrying an ADDIN EN.CITE instruction stays untouched.
+
+    This is the guarantee that opting in cannot damage citations EndNote owns.
+    """
+
+    input_docx = tmp_path / "input.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Lead text. ")
+    _add_word_field(paragraph, " ADDIN EN.CITE existing-citation ", "(PMID: 12345678)")
+    document.save(input_docx)
+
+    result = scan_docx(input_docx, ReplacementOptions(convert_locked_citations=True))
+
+    assert result.unique_pmids == []
+    assert any("field or hidden text" in warning for warning in result.warnings)
+
+
+def test_real_endnote_hyperlink_field_is_never_converted(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Lead text. ")
+    _add_endnote_hyperlink_field(paragraph, "(PMID: 12345678)")
+    document.save(input_docx)
+
+    result = scan_docx(input_docx, ReplacementOptions(convert_locked_citations=True))
+
+    assert result.unique_pmids == []
+
+
+def test_locked_wrapper_holding_prose_is_left_alone(tmp_path: Path) -> None:
+    """Lifting a citation out of prose would reorder the sentence."""
+
+    input_docx = tmp_path / "input.docx"
+    _locked_citation_docx(
+        input_docx,
+        _add_codeless_field_shell,
+        "see also (PMID: 12345678) for detail",
+    )
+
+    result = scan_docx(input_docx, ReplacementOptions(convert_locked_citations=True))
+
+    assert result.unique_pmids == []
+    assert any("field or hidden text" in warning for warning in result.warnings)

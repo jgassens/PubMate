@@ -155,6 +155,18 @@ def save_skip_reference_section(enabled: bool, path: Path | None = None) -> None
     _save_setting("skip_reference_section", bool(enabled), path)
 
 
+def get_convert_locked_citations(path: Path | None = None) -> bool:
+    """Return whether notes inside leftover EndNote wrappers are converted."""
+
+    return _get_bool("convert_locked_citations", False, path)
+
+
+def save_convert_locked_citations(enabled: bool, path: Path | None = None) -> None:
+    """Persist the locked-citation conversion preference."""
+
+    _save_setting("convert_locked_citations", bool(enabled), path)
+
+
 def save_gui_settings(values: dict[str, Any], path: Path | None = None) -> None:
     """Persist all GUI preferences with their normal types in one write."""
 
@@ -176,6 +188,7 @@ def save_gui_settings(values: dict[str, Any], path: Path | None = None) -> None:
         "write_report",
         "scan_parenthetical_pmids",
         "skip_reference_section",
+        "convert_locked_citations",
     ):
         if key in values:
             settings[key] = bool(values[key])

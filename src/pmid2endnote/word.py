@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import shutil
-from typing import Any, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 from docx import Document
 from docx.document import Document as DocxDocument
@@ -159,6 +159,7 @@ class ReplacementOptions:
     scan_bare_dois: bool = False
     skip_reference_section: bool = True
     create_backup: bool = False
+    convert_locked_citations: bool = False
 
 
 @dataclass(frozen=True)
@@ -259,6 +260,7 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
             paragraph,
             replacement_blocks,
             field_depth_cache,
+            convert_locked_citations=options.convert_locked_citations,
         )
         if field_or_hidden_blocks:
             warnings.append(
@@ -309,6 +311,7 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
                 replacement_blocks,
                 field_depth_cache,
                 check_run_editability=False,
+                convert_locked_citations=options.convert_locked_citations,
             )
             if field_or_hidden_blocks:
                 warnings.append(
@@ -348,6 +351,7 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
             paragraph,
             replacement_blocks,
             field_depth_cache,
+            convert_locked_citations=options.convert_locked_citations,
         )
         if field_or_hidden_blocks:
             warnings.append(
@@ -427,6 +431,7 @@ def replace_pmids_in_docx(
             scan_dois=options.scan_dois,
             scan_bare_dois=options.scan_bare_dois,
             field_depth_cache=field_depth_cache,
+            convert_locked_citations=options.convert_locked_citations,
         )
         replacements.extend(paragraph_replacements)
         warnings.extend(paragraph_warnings)
@@ -454,6 +459,7 @@ def replace_pmids_in_docx(
             scan_dois=options.scan_dois,
             scan_bare_dois=options.scan_bare_dois,
             field_depth_cache=field_depth_cache,
+            convert_locked_citations=options.convert_locked_citations,
         )
         replacements.extend(paragraph_replacements)
         warnings.extend(paragraph_warnings)
@@ -634,6 +640,7 @@ def _partition_blocks_around_unsafe_content(
     field_depth_cache: FieldDepthCache,
     *,
     check_run_editability: bool = True,
+    convert_locked_citations: bool = False,
 ) -> tuple[list[TextRangeT], list[TextRangeT], list[TextRangeT], list[TextRangeT]]:
     """Keep blocks outside Word fields/hidden runs and reject overlapping blocks.
 
@@ -652,13 +659,30 @@ def _partition_blocks_around_unsafe_content(
     if unsafe_ranges is None:
         return [], blocks, [], []
 
+    locked_wrappers = (
+        _locked_citation_wrappers(_run_records(paragraph, mapped_runs, field_depth_cache))
+        if convert_locked_citations
+        else []
+    )
+    text = paragraph.text
+
     safe: list[TextRangeT] = []
     field_or_hidden: list[TextRangeT] = []
     tracked_changes: list[TextRangeT] = []
     non_text: list[TextRangeT] = []
     for block in blocks:
         if _range_overlaps_any(block.start, block.end, unsafe_ranges):
-            field_or_hidden.append(block)
+            if _locked_wrapper_for_range(
+                locked_wrappers, text, block.start, block.end
+            ) is not None and not _identifier_touches_omitted_content(
+                paragraph,
+                mapped_runs,
+                block.start,
+                block.end,
+            ):
+                safe.append(block)
+            else:
+                field_or_hidden.append(block)
         elif _identifier_touches_omitted_content(
             paragraph,
             mapped_runs,
@@ -722,6 +746,227 @@ def _unsafe_text_ranges(
         field_depth = max(0, field_depth - end_count)
 
     return ranges
+
+
+@dataclass(frozen=True)
+class LockedCitationWrapper:
+    """A link or codeless field shell whose visible text is an identifier block.
+
+    Manuscripts that have already been formatted by EndNote carry two kinds of
+    leftover wrapper around author-typed text: bibliography cross-reference
+    hyperlinks, and complex fields that no longer hold a field instruction.
+    Neither owns a citation, so a PMID/DOI note inside one can be lifted out
+    without editing a real ``ADDIN EN.CITE`` field.
+    """
+
+    start: int
+    end: int
+    runs: tuple[Run, ...]
+    insert_after: Any
+    kind: Literal["hyperlink", "codeless_field"]
+
+
+@dataclass(frozen=True)
+class _RunRecord:
+    """A mapped run with its text offsets and surrounding field/link state."""
+
+    run: Run
+    start: int
+    end: int
+    depth_before: int
+    field_types: tuple[str, ...]
+    instruction: str
+    hyperlink: Any | None
+
+
+def _run_records(
+    paragraph: Paragraph,
+    mapped_runs: list[tuple[Run, bool]],
+    field_depth_cache: FieldDepthCache,
+) -> list[_RunRecord]:
+    """Describe each mapped run's offsets, field depth, and hyperlink parent."""
+
+    records: list[_RunRecord] = []
+    cursor = 0
+    depth = _field_depth_at_paragraph_start(paragraph, field_depth_cache)
+    for run, _ in mapped_runs:
+        markers = [
+            marker
+            for marker in _iter_story_elements(run._r)
+            if marker.tag == qn("w:fldChar")
+        ]
+        field_types = tuple(
+            marker.get(qn("w:fldCharType")) or "" for marker in markers
+        )
+        instruction = "".join(
+            element.text or "" for element in run._r.iter(qn("w:instrText"))
+        )
+        start = cursor
+        cursor += len(run.text)
+        records.append(
+            _RunRecord(
+                run=run,
+                start=start,
+                end=cursor,
+                depth_before=depth,
+                field_types=field_types,
+                instruction=instruction,
+                hyperlink=_hyperlink_ancestor(run._r, paragraph),
+            )
+        )
+        depth += field_types.count("begin")
+        depth = max(0, depth - field_types.count("end"))
+    return records
+
+
+def _hyperlink_ancestor(element: Any, paragraph: Paragraph) -> Any | None:
+    hyperlink_tag = qn("w:hyperlink")
+    parent = element.getparent()
+    while parent is not None and parent is not paragraph._p:
+        if parent.tag == hyperlink_tag:
+            return parent
+        parent = parent.getparent()
+    return None
+
+
+def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationWrapper]:
+    """Return leftover EndNote wrappers whose text may be safely lifted out.
+
+    A complex field is only eligible when its instruction is blank. Real
+    EndNote citations always carry an ``ADDIN EN.CITE`` instruction, so they
+    never qualify here regardless of what their displayed text looks like.
+    """
+
+    wrappers: list[LockedCitationWrapper] = []
+
+    index = 0
+    while index < len(records):
+        hyperlink = records[index].hyperlink
+        if hyperlink is None:
+            index += 1
+            continue
+        group: list[_RunRecord] = []
+        while index < len(records) and records[index].hyperlink is hyperlink:
+            group.append(records[index])
+            index += 1
+        if any(record.depth_before or record.field_types for record in group):
+            continue
+        runs = tuple(record.run for record in group if record.end > record.start)
+        if runs:
+            wrappers.append(
+                LockedCitationWrapper(
+                    start=group[0].start,
+                    end=group[-1].end,
+                    runs=runs,
+                    insert_after=hyperlink,
+                    kind="hyperlink",
+                )
+            )
+
+    open_fields: list[dict[str, Any]] = []
+    for record in records:
+        for field_type in record.field_types:
+            if field_type == "begin":
+                open_fields.append(
+                    {
+                        "depth_before": record.depth_before,
+                        "instruction": [],
+                        "result_start": None,
+                        "runs": [],
+                    }
+                )
+            elif field_type == "separate" and open_fields:
+                open_fields[-1]["result_start"] = record.end
+            elif field_type == "end" and open_fields:
+                field = open_fields.pop()
+                wrapper = _codeless_field_wrapper(field, record)
+                if wrapper is not None:
+                    wrappers.append(wrapper)
+        if open_fields:
+            open_fields[-1]["instruction"].append(record.instruction)
+            if open_fields[-1]["result_start"] is not None and record.end > record.start:
+                open_fields[-1]["runs"].append(record.run)
+
+    return wrappers
+
+
+def _codeless_field_wrapper(
+    field: dict[str, Any],
+    end_record: _RunRecord,
+) -> LockedCitationWrapper | None:
+    if field["result_start"] is None or field["depth_before"]:
+        return None
+    if "".join(field["instruction"]).strip():
+        return None
+    runs: list[Run] = field["runs"]
+    if not runs:
+        return None
+    start = int(field["result_start"])
+    return LockedCitationWrapper(
+        start=start,
+        end=start + sum(len(run.text) for run in runs),
+        runs=tuple(runs),
+        insert_after=end_record.run._r,
+        kind="codeless_field",
+    )
+
+
+def _locked_wrapper_for_range(
+    wrappers: list[LockedCitationWrapper],
+    text: str,
+    start: int,
+    end: int,
+) -> LockedCitationWrapper | None:
+    """Return the wrapper whose whole visible text is the identifier block.
+
+    A wrapper holding prose beside the identifier is left alone, because
+    lifting the citation out of it would reorder the author's sentence.
+    """
+
+    for wrapper in wrappers:
+        if wrapper.start <= start and end <= wrapper.end:
+            leading = text[wrapper.start : start]
+            trailing = text[end : wrapper.end]
+            if not leading.strip() and not trailing.strip():
+                return wrapper
+    return None
+
+
+def _replace_locked_wrapper(
+    wrapper: LockedCitationWrapper,
+    start: int,
+    end: int,
+    replacement: str,
+) -> bool:
+    """Clear the identifier inside a wrapper and emit the citation after it.
+
+    The citation is placed outside the wrapper so EndNote reads it as ordinary
+    manuscript text rather than as a field result it may later regenerate.
+    """
+
+    if not all(_run_has_only_safe_children(run) for run in wrapper.runs):
+        return False
+    if any(run._r.xpath(".//w:vanish") for run in wrapper.runs):
+        return False
+
+    cursor = wrapper.start
+    for run in wrapper.runs:
+        run_start = cursor
+        run_end = cursor + len(run.text)
+        cursor = run_end
+        if run_start >= end or run_end <= start:
+            continue
+        run.text = (
+            run.text[: max(0, start - run_start)] + run.text[max(0, end - run_start) :]
+        )
+
+    run_element = OxmlElement("w:r")
+    text_element = OxmlElement("w:t")
+    text_element.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    text_element.text = replacement
+    run_element.append(text_element)
+    wrapper.insert_after.addnext(run_element)
+    return True
 
 
 def _field_depth_at_paragraph_start(
@@ -1060,6 +1305,7 @@ def _replace_paragraph_blocks(
     scan_dois: bool,
     scan_bare_dois: bool,
     field_depth_cache: FieldDepthCache,
+    convert_locked_citations: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     text = paragraph.text
     blocks = scan_text(
@@ -1086,6 +1332,7 @@ def _replace_paragraph_blocks(
         paragraph,
         replacement_blocks,
         field_depth_cache,
+        convert_locked_citations=convert_locked_citations,
     )
     planned: list[tuple[ReplacementBlock, str, dict[str, Any]]] = []
     report_replacements: list[dict[str, Any]] = []
@@ -1140,6 +1387,8 @@ def _replace_paragraph_blocks(
                 block.start,
                 block.end,
                 replacement_text,
+                convert_locked_citations=convert_locked_citations,
+                field_depth_cache=field_depth_cache,
             ):
                 applied_reports.append(report)
             else:
@@ -1187,6 +1436,7 @@ def _insert_comment_pmids_at_anchors(
             blocks,
             field_depth_cache,
             check_run_editability=False,
+            convert_locked_citations=options.convert_locked_citations,
         )
         if field_or_hidden_blocks:
             warnings.append(
@@ -1532,14 +1782,31 @@ def _replace_paragraph_range(
     start: int,
     end: int,
     replacement: str,
+    *,
+    convert_locked_citations: bool = False,
+    field_depth_cache: FieldDepthCache | None = None,
 ) -> bool:
     mapped_runs = _paragraph_text_runs(paragraph)
-    if (
-        mapped_runs is None
-        or _identifier_touches_omitted_content(paragraph, mapped_runs, start, end)
-        or _mapped_runs_interrupted(mapped_runs, start, end)
-        or not _mapped_runs_can_replace_range(mapped_runs, start, end)
+    if mapped_runs is None or _identifier_touches_omitted_content(
+        paragraph, mapped_runs, start, end
     ):
+        return False
+
+    if convert_locked_citations:
+        wrapper = _locked_wrapper_for_range(
+            _locked_citation_wrappers(
+                _run_records(paragraph, mapped_runs, field_depth_cache or {})
+            ),
+            paragraph.text,
+            start,
+            end,
+        )
+        if wrapper is not None:
+            return _replace_locked_wrapper(wrapper, start, end, replacement)
+
+    if _mapped_runs_interrupted(
+        mapped_runs, start, end
+    ) or not _mapped_runs_can_replace_range(mapped_runs, start, end):
         return False
 
     spans: list[tuple[int, int, Run, bool]] = []

@@ -63,6 +63,7 @@ class ProcessingOptions:
     scan_bare_dois: bool = False
     skip_reference_section: bool = True
     create_backup: bool = False
+    convert_locked_citations: bool = False
     doi_source: str = "auto"
     import_format: str = "enw"
     save_email: bool = True
@@ -113,6 +114,7 @@ def process_document(
     report["include_comments"] = options.include_comments
     report["skip_reference_section"] = options.skip_reference_section
     report["create_backup"] = options.create_backup
+    report["convert_locked_citations"] = options.convert_locked_citations
 
     if options.import_format != "enw":
         message = "Only EndNote Tagged Import format is supported: --import-format enw"
@@ -134,6 +136,7 @@ def process_document(
         scan_bare_dois=options.scan_bare_dois,
         skip_reference_section=options.skip_reference_section,
         create_backup=options.create_backup,
+        convert_locked_citations=options.convert_locked_citations,
     )
 
     try:
