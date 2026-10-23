@@ -304,6 +304,12 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
                     _skipped_identifier_reports(blocks, location, reason="reference_section")
                 )
                 continue
+            if not _comment_anchor_is_safe(context, location.comment_id, field_depth_cache):
+                skipped_identifiers.extend(
+                    _skipped_identifier_reports(blocks, location, reason="unsafe_comment_anchor")
+                )
+                warnings.append(_unsafe_comment_anchor_warning(location.comment_id))
+                continue
             replacement_blocks = _replacement_blocks_for_text(
                 paragraph.text,
                 scan_parenthetical_pmids=options.scan_parenthetical_pmids,
@@ -1539,6 +1545,9 @@ def _insert_comment_pmids_at_anchors(
         )
         if not blocks:
             continue
+        if not _comment_anchor_is_safe(context, comment_location.comment_id, field_depth_cache):
+            warnings.append(_unsafe_comment_anchor_warning(comment_location.comment_id))
+            continue
         (
             blocks,
             field_or_hidden_blocks,
@@ -1655,6 +1664,39 @@ def _find_comment_anchor_element(paragraph: Paragraph, comment_id: int):
         if ref.get(qn("w:id")) == id_text:
             return ref
     return None
+
+
+def _comment_anchor_is_safe(
+    context: ReferenceSectionContext,
+    comment_id: int | None,
+    field_depth_cache: FieldDepthCache,
+) -> bool:
+    anchor = context.anchor_locations.get(comment_id)
+    if anchor is None or comment_id is None:
+        return False
+    paragraph, _ = anchor
+    element = _find_comment_anchor_element(paragraph, comment_id)
+    if element is None or element.getparent() is not paragraph._p:
+        return False
+    depth = _field_depth_at_paragraph_start(paragraph, field_depth_cache)
+    for child in paragraph._p:
+        for marker in _iter_story_elements(child):
+            if marker.tag == qn("w:fldChar"):
+                kind = marker.get(qn("w:fldCharType"))
+                if kind == "begin":
+                    depth += 1
+                elif kind == "end":
+                    depth = max(0, depth - 1)
+        if child is element:
+            return depth == 0
+    return False
+
+
+def _unsafe_comment_anchor_warning(comment_id: int | None) -> str:
+    return (
+        f"Skipped identifiers in comment {comment_id}: its document anchor is missing "
+        "or inside a Word field or nested content."
+    )
 
 
 def _replacement_for_block(

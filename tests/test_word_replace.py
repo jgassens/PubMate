@@ -2369,3 +2369,40 @@ def test_two_wrappers_and_plain_note_keep_offsets_and_order(tmp_path: Path, firs
         "{Two, 2024, PMID-23456789} and {Three, 2024, PMID-34567890}\t"
     )
     assert len(result.replacements) == 3
+
+
+@pytest.mark.parametrize("spanning_paragraphs", [False, True])
+@pytest.mark.parametrize("builder", [_add_codeless_field_shell, _add_bibliography_hyperlink])
+def test_comment_wrapper_cannot_insert_into_real_endnote_field(
+    tmp_path: Path, builder, spanning_paragraphs: bool,
+) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    _field_marker(paragraph.add_run(), "begin")
+    _field_instruction(paragraph.add_run(), " ADDIN EN.CITE real-citation ")
+    _field_marker(paragraph.add_run(), "separate")
+    if spanning_paragraphs:
+        paragraph = document.add_paragraph()
+    anchor = paragraph.add_run("(Smith, 2024)")
+    _field_marker(paragraph.add_run(), "end")
+    comment = document.add_comment(anchor, text="", author="Reviewer")
+    builder(comment.paragraphs[0], "(PMID: 12345678)")
+    document.save(input_docx)
+    original = Document(input_docx)
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "New", "2025")},
+    )
+
+    output = Document(output_docx)
+    assert output.element.body.xml == original.element.body.xml
+    assert output.comments.get(0)._element.xml == original.comments.get(0)._element.xml
+    assert result.replacements == []
+    scan = scan_docx(input_docx)
+    assert scan.unique_pmids == []
+    assert len(scan.skipped_identifiers) == 1
+    assert scan.skipped_identifiers[0]["reason"] == "unsafe_comment_anchor"

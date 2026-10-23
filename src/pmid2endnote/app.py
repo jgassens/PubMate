@@ -600,6 +600,7 @@ _SKIP_REASON_TEXT = {
     "locked_citation": "inside an existing EndNote citation or link",
     "tracked_changes": "next to tracked changes or content controls",
     "non_text_content": "sharing a run with an image or page break",
+    "unsafe_comment_anchor": "in comments without a safe document anchor",
 }
 
 
