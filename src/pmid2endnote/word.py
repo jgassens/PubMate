@@ -865,7 +865,14 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
             index += 1
         if any(record.depth_before or record.field_types for record in group):
             continue
-        runs = tuple(record.run for record in group if record.end > record.start)
+        if any(
+            child.tag != qn("w:r") and child.tag not in _HARMLESS_PARAGRAPH_MARKERS
+            for child in hyperlink
+        ):
+            continue
+        # Include empty runs: a page break or drawing has no mapped text but
+        # must not be crossed when lifting the note out of its link.
+        runs = tuple(record.run for record in group)
         if runs:
             wrappers.append(
                 LockedCitationWrapper(
@@ -883,7 +890,9 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
         # run would put the replacement inside the new field. Likewise, two
         # begins in one run share depth_before, so it cannot identify a
         # top-level wrapper. Leave these ambiguous boundaries untouched.
-        ambiguous_boundary = len(record.field_types) > 1
+        ambiguous_boundary = len(record.field_types) > 1 or bool(
+            record.field_types and record.end > record.start
+        )
         for field in open_fields:
             field["instruction"].append(record.instruction)
             field["ambiguous_boundary"] |= ambiguous_boundary
@@ -892,6 +901,7 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
                 open_fields.append(
                     {
                         "depth_before": record.depth_before,
+                        "begin_run": record.run._r,
                         "instruction": [record.instruction],
                         "ambiguous_boundary": ambiguous_boundary,
                         "result_start": None,
@@ -905,9 +915,9 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
                 wrapper = _codeless_field_wrapper(field, record)
                 if wrapper is not None:
                     wrappers.append(wrapper)
-        if open_fields:
-            if open_fields[-1]["result_start"] is not None and record.end > record.start:
-                open_fields[-1]["runs"].append(record.run)
+        for field in open_fields:
+            if field["result_start"] is not None and record.end > record.start:
+                field["runs"].append(record.run)
 
     return wrappers
 
@@ -927,10 +937,30 @@ def _codeless_field_wrapper(
     runs: list[Run] = field["runs"]
     if not runs:
         return None
+    parent = end_record.run._r.getparent()
+    if (
+        parent is None
+        or parent.tag != qn("w:p")
+        or field["begin_run"].getparent() is not parent
+    ):
+        return None
+    # Field markers may be interleaved with result runs, but a hyperlink,
+    # tracked change, drawing, or other omitted content is not an empty shell.
+    for element in parent[parent.index(field["begin_run"]) : parent.index(end_record.run._r) + 1]:
+        if element.tag == qn("w:r"):
+            if not _run_element_has_only_safe_children(element) and not all(
+                child.tag in {qn("w:rPr"), qn("w:fldChar"), qn("w:instrText")}
+                for child in element
+            ):
+                return None
+        elif element.tag not in _HARMLESS_PARAGRAPH_MARKERS:
+            return None
     start = int(field["result_start"])
+    if start + sum(len(run.text) for run in runs) != end_record.start:
+        return None
     return LockedCitationWrapper(
         start=start,
-        end=start + sum(len(run.text) for run in runs),
+        end=end_record.start,
         runs=tuple(runs),
         insert_after=end_record.run._r,
         kind="codeless_field",
@@ -951,6 +981,10 @@ def _locked_wrapper_for_range(
 
     for wrapper in wrappers:
         if wrapper.start <= start and end <= wrapper.end:
+            if not all(_run_has_only_safe_children(run) for run in wrapper.runs):
+                continue
+            if any(run._r.xpath(".//w:vanish") for run in wrapper.runs):
+                continue
             leading = text[wrapper.start : start]
             trailing = text[end : wrapper.end]
             if not leading.strip() and not trailing.strip():

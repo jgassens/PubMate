@@ -2248,3 +2248,64 @@ def test_wrapper_conversion_preserves_real_fields_exactly(tmp_path: Path, layout
     assert Document(output_docx).element.body.xml == original_xml
     assert result.replacements == []
     assert scan_docx(input_docx).unique_pmids == []
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "nested_result", "text_in_end_run", "field_in_hyperlink",
+        "tracked_hyperlink_text", "hyperlink_page_break", "hidden", "image",
+    ],
+)
+def test_unsafe_wrapper_layout_is_skipped_before_resolution(tmp_path: Path, layout) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    if layout == "nested_result":
+        _field_marker(paragraph.add_run(), "begin")
+        _field_marker(paragraph.add_run(), "separate")
+        paragraph.add_run("(PMID: 12345678)")
+        _add_codeless_field_shell(paragraph, " additional prose")
+        _field_marker(paragraph.add_run(), "end")
+    elif layout in {"text_in_end_run", "field_in_hyperlink"}:
+        _add_codeless_field_shell(paragraph, "(PMID: 12345678)")
+        if layout == "text_in_end_run":
+            paragraph.runs[-1].add_text(" additional prose")
+        else:
+            hyperlink = OxmlElement("w:hyperlink")
+            hyperlink.set(qn("w:anchor"), "_ENREF_12")
+            for run in paragraph.runs[1:]:
+                hyperlink.append(run._r)
+            paragraph._p.append(hyperlink)
+    else:
+        hyperlink = _add_hyperlink(paragraph, "(PMID: 12345678)", "_ENREF_12")
+        if layout == "tracked_hyperlink_text":
+            hyperlink.append(_omitted_content("w:ins", " additional prose"))
+        elif layout == "hyperlink_page_break":
+            run = OxmlElement("w:r")
+            page_break = OxmlElement("w:br")
+            page_break.set(qn("w:type"), "page")
+            run.append(page_break)
+            hyperlink.append(run)
+        elif layout == "hidden":
+            properties = OxmlElement("w:rPr")
+            properties.append(OxmlElement("w:vanish"))
+            hyperlink[0].insert(0, properties)
+        else:
+            hyperlink[0].append(OxmlElement("w:drawing"))
+    paragraph.add_run(" after.")
+    document.save(input_docx)
+    original_xml = Document(input_docx).element.body.xml
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Smith", "2024")},
+    )
+
+    assert Document(output_docx).element.body.xml == original_xml
+    assert result.replacements == []
+    scan = scan_docx(input_docx)
+    assert scan.unique_pmids == []
+    assert [entry["normalized"] for entry in scan.skipped_identifiers] == ["12345678"]
