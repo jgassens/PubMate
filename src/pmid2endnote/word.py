@@ -653,8 +653,8 @@ def _partition_blocks_around_unsafe_content(
     blocks: list[TextRangeT],
     field_depth_cache: FieldDepthCache,
     *,
+    convert_locked_citations: bool,
     check_run_editability: bool = True,
-    convert_locked_citations: bool = False,
 ) -> tuple[list[TextRangeT], list[TextRangeT], list[TextRangeT], list[TextRangeT]]:
     """Keep blocks outside Word fields/hidden runs and reject overlapping blocks.
 
@@ -1352,7 +1352,7 @@ def _replace_paragraph_blocks(
     scan_dois: bool,
     scan_bare_dois: bool,
     field_depth_cache: FieldDepthCache,
-    convert_locked_citations: bool = False,
+    convert_locked_citations: bool,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     text = paragraph.text
     blocks = scan_text(
@@ -1830,7 +1830,7 @@ def _replace_paragraph_range(
     end: int,
     replacement: str,
     *,
-    convert_locked_citations: bool = False,
+    convert_locked_citations: bool,
     field_depth_cache: FieldDepthCache | None = None,
 ) -> bool:
     mapped_runs = _paragraph_text_runs(paragraph)
