@@ -497,3 +497,26 @@ def test_rejected_identifiers_are_reported_in_every_scanned_story(
     assert "No matching PMID or DOI blocks were found" not in message
     assert not result.output_docx.exists()
     assert not result.enw_file.exists()
+
+
+@pytest.mark.parametrize("story", ["header", "footer"])
+def test_linked_header_or_footer_is_counted_once(tmp_path: Path, story: str) -> None:
+    input_docx = tmp_path / "input.docx"
+    document = Document()
+    document.add_paragraph("Body text")
+    paragraph = getattr(document.sections[0], story).paragraphs[0]
+    paragraph.add_run("PMID: 12345678").font.hidden = True
+    document.add_section()  # This section reuses the same header/footer XML.
+    document.save(input_docx)
+
+    result = process_document(ProcessingOptions(
+        input_docx=input_docx,
+        include_headers=True,
+        include_footers=True,
+        save_email=False,
+        write_report=False,
+        write_nbib=False,
+    ))
+
+    assert len(result.report["skipped_identifiers"]) == 1
+    assert "Found 1 PMID/DOI identifier but converted none" in " ".join(result.messages)

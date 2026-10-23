@@ -604,10 +604,14 @@ def _iter_header_footer_paragraphs(
     document: DocxDocument,
     options: ReplacementOptions,
 ) -> Iterator[tuple[Paragraph, TextLocation]]:
+    seen: set[Any] = set()
     if options.include_headers:
         header_index = 0
         for section in document.sections:
             for paragraph in section.header.paragraphs:
+                if paragraph._p in seen:
+                    continue
+                seen.add(paragraph._p)
                 yield paragraph, TextLocation(part="header", paragraph_index=header_index)
                 header_index += 1
 
@@ -615,6 +619,9 @@ def _iter_header_footer_paragraphs(
         footer_index = 0
         for section in document.sections:
             for paragraph in section.footer.paragraphs:
+                if paragraph._p in seen:
+                    continue
+                seen.add(paragraph._p)
                 yield paragraph, TextLocation(part="footer", paragraph_index=footer_index)
                 footer_index += 1
 
