@@ -63,7 +63,7 @@ class ProcessingOptions:
     scan_bare_dois: bool = False
     skip_reference_section: bool = True
     create_backup: bool = False
-    convert_locked_citations: bool = False
+    convert_locked_citations: bool = True
     doi_source: str = "auto"
     import_format: str = "enw"
     save_email: bool = True
@@ -164,15 +164,7 @@ def process_document(
 
     if not scan_result.unique_identifiers:
         _write_report_if_enabled(report, report_file, options.write_report)
-        if scan_result.skipped_identifiers:
-            messages.append(
-                "No processable PMID or DOI blocks were found outside the detected reference section. "
-                "No Word or EndNote files were written."
-            )
-        else:
-            messages.append(
-                "No matching PMID or DOI blocks were found. No Word or EndNote files were written."
-            )
+        messages.append(_nothing_converted_message(scan_result.skipped_identifiers))
         if options.write_report:
             messages.append(f"Wrote report: {report_file}")
         return ProcessingResult(0, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
@@ -596,6 +588,49 @@ def _dry_run_auxiliary_nbib_pmids(
     except PubMedFetchError as exc:
         warnings.append(f"Auxiliary .nbib dry-run validation failed: {exc}")
         return set()
+
+
+_SKIP_REASON_TEXT = {
+    "reference_section": "in the document's reference section",
+    "locked_citation": "inside an existing EndNote citation or link",
+    "tracked_changes": "next to tracked changes or content controls",
+    "non_text_content": "sharing a run with an image or page break",
+}
+
+
+def _nothing_converted_message(skipped_identifiers: list[dict[str, Any]]) -> str:
+    """Explain why nothing was converted without claiming nothing was found.
+
+    Reporting "no matching blocks" when identifiers were found and then
+    rejected sends the user looking for a scanning problem that does not
+    exist, so say how many were found and what stopped each group.
+    """
+
+    if not skipped_identifiers:
+        return "No matching PMID or DOI blocks were found. No Word or EndNote files were written."
+
+    counts: dict[str, int] = {}
+    for entry in skipped_identifiers:
+        reason = str(entry.get("reason", "")) or "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
+
+    total = sum(counts.values())
+    parts = [
+        f"{count} {_SKIP_REASON_TEXT.get(reason, reason)}"
+        for reason, count in sorted(counts.items(), key=lambda item: -item[1])
+    ]
+    message = (
+        f"Found {total} PMID/DOI identifier{'' if total == 1 else 's'} but converted none: "
+        + "; ".join(parts)
+        + ". No Word or EndNote files were written."
+    )
+    if counts.get("locked_citation"):
+        message += (
+            " Identifiers inside existing EndNote citations are only converted when "
+            "\"Convert PMID/DOI notes stuck inside existing EndNote citations\" is enabled "
+            "(--convert-locked-citations)."
+        )
+    return message
 
 
 def _write_report_if_enabled(report: dict, report_file: Path, enabled: bool) -> None:

@@ -287,3 +287,105 @@ def test_reference_section_skipped_identifiers_do_not_enter_import_or_statuses(
     assert output_document.paragraphs[3].text == (
         "1. Skipped repeat. PMID: 38408451. DOI: 10.1021/acs.chemrev.3c00409."
     )
+
+
+def _codeless_field_docx(path: Path, visible_text: str) -> None:
+    """Write a .docx whose identifier sits in a leftover EndNote wrapper."""
+
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    document = Document()
+    paragraph = document.add_paragraph("Lead text. ")
+    for _ in range(2):
+        begin = OxmlElement("w:fldChar")
+        begin.set(qn("w:fldCharType"), "begin")
+        paragraph.add_run()._r.append(begin)
+    nested_end = OxmlElement("w:fldChar")
+    nested_end.set(qn("w:fldCharType"), "end")
+    paragraph.add_run()._r.append(nested_end)
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    paragraph.add_run()._r.append(separate)
+    paragraph.add_run(visible_text)
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    paragraph.add_run()._r.append(end)
+    document.save(path)
+
+
+def test_locked_citations_are_converted_without_opting_in(tmp_path: Path, monkeypatch) -> None:
+    """A manuscript already formatted by EndNote must work out of the box."""
+
+    input_docx = tmp_path / "input.docx"
+    _codeless_field_docx(input_docx, "(PMID: 12345678)")
+
+    captured: dict[str, object] = {}
+
+    class _Client:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def fetch_records(self, pmids):
+            captured["pmids"] = list(pmids)
+            return {pmid: PubMedRecord(pmid, "Smith", "2024") for pmid in pmids}
+
+    monkeypatch.setattr(app, "PubMedClient", _Client)
+
+    result = process_document(
+        ProcessingOptions(
+            input_docx=input_docx,
+            email="someone@example.edu",
+            save_email=False,
+            write_report=False,
+            write_nbib=False,
+        )
+    )
+
+    assert result.report["unique_pmids"] == ["12345678"]
+    assert not any("converted none" in message for message in result.messages)
+
+
+def test_nothing_converted_message_reports_what_was_found(tmp_path: Path) -> None:
+    """Saying nothing was found, when 1 was found and rejected, sends the
+    user hunting for a scanning bug that does not exist."""
+
+    input_docx = tmp_path / "input.docx"
+    _codeless_field_docx(input_docx, "(PMID: 12345678)")
+
+    result = process_document(
+        ProcessingOptions(
+            input_docx=input_docx,
+            email="someone@example.edu",
+            save_email=False,
+            write_report=False,
+            write_nbib=False,
+            convert_locked_citations=False,
+        )
+    )
+
+    message = " ".join(result.messages)
+    assert "Found 1 PMID/DOI identifier but converted none" in message
+    assert "inside an existing EndNote citation or link" in message
+    assert "--convert-locked-citations" in message
+    assert "No matching PMID or DOI blocks were found" not in message
+
+
+def test_document_with_no_identifiers_still_says_none_were_found(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    _save_docx(input_docx, "This manuscript cites nothing at all.")
+
+    result = process_document(
+        ProcessingOptions(
+            input_docx=input_docx,
+            email="someone@example.edu",
+            save_email=False,
+            write_report=False,
+            write_nbib=False,
+        )
+    )
+
+    assert any(
+        "No matching PMID or DOI blocks were found" in message
+        for message in result.messages
+    )

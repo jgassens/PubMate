@@ -159,7 +159,7 @@ class ReplacementOptions:
     scan_bare_dois: bool = False
     skip_reference_section: bool = True
     create_backup: bool = False
-    convert_locked_citations: bool = False
+    convert_locked_citations: bool = True
 
 
 @dataclass(frozen=True)
@@ -274,6 +274,14 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
             warnings.append(
                 _tracked_change_warning(location, len(tracked_change_blocks))
             )
+        skipped_identifiers.extend(
+            _skipped_replacement_reports(
+                field_or_hidden_blocks,
+                tracked_change_blocks,
+                non_text_blocks,
+                location,
+            )
+        )
         occurrences.extend(
             DocumentPmidOccurrence(block=block, location=location)
             for replacement_block in replacement_blocks
@@ -371,10 +379,16 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
             for block in replacement_block.blocks
         )
 
-    if skipped_identifiers:
+    # Count only reference-section skips here. Other reasons are already
+    # reported per paragraph, and lumping them in claimed a reference section
+    # that documents without one never had.
+    reference_section_skips = sum(
+        1 for entry in skipped_identifiers if entry.get("reason") == "reference_section"
+    )
+    if reference_section_skips:
         warnings.append(
-            f"Skipped {len(skipped_identifiers)} identifier block"
-            f"{'' if len(skipped_identifiers) == 1 else 's'} in the detected reference section."
+            f"Skipped {reference_section_skips} identifier block"
+            f"{'' if reference_section_skips == 1 else 's'} in the detected reference section."
         )
 
     if options.include_footnotes:
@@ -1291,6 +1305,39 @@ def _tracked_change_warning(location: TextLocation, count: int) -> str:
         f"that may alter the identifier at "
         f"{location.part} paragraph {location.paragraph_index}."
     )
+
+
+_SKIP_REASONS = (
+    ("locked_citation", "field or hidden text"),
+    ("tracked_changes", "tracked changes or content controls"),
+    ("non_text_content", "non-text run content"),
+)
+
+
+def _skipped_replacement_reports(
+    field_or_hidden: list[Any],
+    tracked_changes: list[Any],
+    non_text: list[Any],
+    location: TextLocation,
+) -> list[dict[str, Any]]:
+    """Record why each rejected identifier was not converted.
+
+    Without this the only trace of a rejected identifier is a counted warning,
+    so a caller cannot tell "found nothing" apart from "found them and could
+    not touch them".
+    """
+
+    skipped: list[dict[str, Any]] = []
+    for group, (reason, _) in zip((field_or_hidden, tracked_changes, non_text), _SKIP_REASONS):
+        for replacement_block in group:
+            skipped.extend(
+                _skipped_identifier_reports(
+                    list(replacement_block.blocks),
+                    location,
+                    reason=reason,
+                )
+            )
+    return skipped
 
 
 def _replace_paragraph_blocks(

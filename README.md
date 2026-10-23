@@ -63,7 +63,7 @@ By default PubMate refuses to edit inside any field or link, because editing a
 real citation can damage it. Those notes are reported as skipped with a
 `field or hidden text content` warning and are left alone.
 
-`--convert-locked-citations` converts them anyway. A note only qualifies when:
+Conversion is on by default. A note only qualifies when:
 
 - its wrapper is a hyperlink, or a field carrying **no** field instruction, and
 - the note is the entire visible text of that wrapper.
@@ -74,8 +74,10 @@ just outside the wrapper, as ordinary manuscript text, so EndNote reads it
 instead of treating it as a field result it may regenerate. The wrapper itself
 is left in place.
 
-In the macOS app the same option appears in Settings as "Convert PMID/DOI notes
-stuck inside existing EndNote citations".
+Pass `--no-convert-locked-citations`, or clear "Convert PMID/DOI notes stuck
+inside existing EndNote citations" in the macOS app's Settings, to leave them
+alone. When identifiers are found but not converted, PubMate reports how many
+and why rather than reporting that none were found.
 
 For manuscripts that use raw PMID placeholders, parenthetical scanning is available as an opt-in mode:
 

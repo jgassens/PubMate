@@ -380,7 +380,43 @@ def test_pmid_inside_endnote_hyperlink_field_is_rejected(tmp_path: Path) -> None
     assert result.warnings == scan.warnings
 
 
-def test_pmid_inside_standalone_hyperlink_is_rejected(tmp_path: Path) -> None:
+def test_pmid_inside_standalone_hyperlink_is_converted(tmp_path: Path) -> None:
+    """A link whose whole text is the author's note carries no citation.
+
+    EndNote leaves these around a typed PMID when it formats a manuscript, so
+    converting them is the point. The link element itself stays put.
+    """
+
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    _add_hyperlink(paragraph, "PMID 12345678")
+    paragraph.add_run(" after.")
+    document.save(input_docx)
+
+    assert scan_docx(input_docx).unique_pmids == ["12345678"]
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            "12345678": PubMedRecord("12345678", "Smith", "2024"),
+        },
+    )
+
+    output_paragraph = Document(output_docx).paragraphs[0]
+    assert "{Smith, 2024, PMID-12345678}" in output_paragraph.text
+    assert "PMID 12345678" not in output_paragraph.text
+    assert output_paragraph.text.startswith("Before")
+    assert output_paragraph.text.endswith("after.")
+    assert len(result.replacements) == 1
+    # The wrapper is left in place rather than unwound.
+    body = etree.tostring(Document(output_docx).element.body, encoding="unicode")
+    assert body.count("<w:hyperlink") == 1
+
+
+def test_pmid_inside_standalone_hyperlink_is_kept_when_disabled(tmp_path: Path) -> None:
     input_docx = tmp_path / "input.docx"
     output_docx = tmp_path / "output.docx"
     document = Document()
@@ -391,7 +427,8 @@ def test_pmid_inside_standalone_hyperlink_is_rejected(tmp_path: Path) -> None:
 
     input_paragraph = Document(input_docx).paragraphs[0]
     original_hyperlink_xml = _protected_xml(input_paragraph)
-    scan = scan_docx(input_docx)
+    options = ReplacementOptions(convert_locked_citations=False)
+    scan = scan_docx(input_docx, options)
 
     assert scan.unique_pmids == []
     assert scan.warnings == [
@@ -405,6 +442,7 @@ def test_pmid_inside_standalone_hyperlink_is_rejected(tmp_path: Path) -> None:
         records_by_pmid={
             "12345678": PubMedRecord("12345678", "Unsafe", "2024"),
         },
+        options=options,
     )
 
     output_paragraph = Document(output_docx).paragraphs[0]
@@ -2015,11 +2053,11 @@ def _locked_citation_docx(path: Path, builder, visible_text: str) -> None:
     "builder",
     [_add_codeless_field_shell, _add_bibliography_hyperlink],
 )
-def test_locked_identifier_is_skipped_by_default(tmp_path: Path, builder) -> None:
+def test_locked_identifier_is_skipped_when_disabled(tmp_path: Path, builder) -> None:
     input_docx = tmp_path / "input.docx"
     _locked_citation_docx(input_docx, builder, "(PMID: 12345678)")
 
-    result = scan_docx(input_docx, ReplacementOptions())
+    result = scan_docx(input_docx, ReplacementOptions(convert_locked_citations=False))
 
     assert result.unique_pmids == []
     assert any("field or hidden text" in warning for warning in result.warnings)
@@ -2029,11 +2067,11 @@ def test_locked_identifier_is_skipped_by_default(tmp_path: Path, builder) -> Non
     "builder",
     [_add_codeless_field_shell, _add_bibliography_hyperlink],
 )
-def test_locked_identifier_is_converted_when_enabled(tmp_path: Path, builder) -> None:
+def test_locked_identifier_is_converted_by_default(tmp_path: Path, builder) -> None:
     input_docx = tmp_path / "input.docx"
     output_docx = tmp_path / "output.docx"
     _locked_citation_docx(input_docx, builder, "(PMID: 12345678)")
-    options = ReplacementOptions(convert_locked_citations=True)
+    options = ReplacementOptions()
 
     assert scan_docx(input_docx, options).unique_pmids == ["12345678"]
 

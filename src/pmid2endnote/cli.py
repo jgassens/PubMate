@@ -125,12 +125,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--convert-locked-citations",
+        dest="convert_locked_citations",
         action="store_true",
+        default=True,
         help=(
-            "Also convert PMID/DOI notes trapped inside leftover EndNote wrappers "
+            "Convert PMID/DOI notes trapped inside leftover EndNote wrappers "
             "(bibliography links and fields that carry no citation code). Real "
-            "EndNote citations are never changed. Disabled by default."
+            "EndNote citations are never changed. Enabled by default."
         ),
+    )
+    parser.add_argument(
+        "--no-convert-locked-citations",
+        dest="convert_locked_citations",
+        action="store_false",
+        help="Leave PMID/DOI notes that sit inside existing EndNote citations alone.",
     )
     parser.add_argument(
         "--doi-source",

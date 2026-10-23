@@ -158,7 +158,7 @@ def save_skip_reference_section(enabled: bool, path: Path | None = None) -> None
 def get_convert_locked_citations(path: Path | None = None) -> bool:
     """Return whether notes inside leftover EndNote wrappers are converted."""
 
-    return _get_bool("convert_locked_citations", False, path)
+    return _get_bool("convert_locked_citations", True, path)
 
 
 def save_convert_locked_citations(enabled: bool, path: Path | None = None) -> None:

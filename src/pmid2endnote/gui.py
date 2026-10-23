@@ -102,7 +102,7 @@ def build_processing_options(
         ),
         skip_reference_section=bool(settings_dict.get("skip_reference_section", True)),
         convert_locked_citations=bool(
-            settings_dict.get("convert_locked_citations", False)
+            settings_dict.get("convert_locked_citations", True)
         ),
         create_backup=False,
         **output_paths,
