@@ -2163,3 +2163,88 @@ def test_locked_wrapper_holding_prose_is_left_alone(tmp_path: Path) -> None:
 
     assert result.unique_pmids == []
     assert any("field or hidden text" in warning for warning in result.warnings)
+
+
+def _field_marker(run, kind: str) -> None:
+    marker = OxmlElement("w:fldChar")
+    marker.set(qn("w:fldCharType"), kind)
+    run._r.append(marker)
+
+
+def _field_instruction(run, text: str) -> None:
+    instruction = OxmlElement("w:instrText")
+    instruction.text = text
+    run._r.append(instruction)
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "shared_end_begin", "nested_real_field", "shared_nested_begins",
+        "split_instruction", "spanning_paragraphs", "hyperlink_in_field",
+        "field_in_hyperlink",
+    ],
+)
+def test_wrapper_conversion_preserves_real_fields_exactly(tmp_path: Path, layout) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    if layout == "shared_end_begin":
+        _add_codeless_field_shell(paragraph, "(PMID: 12345678)")
+        _field_marker(paragraph.runs[-1], "begin")
+        _field_instruction(paragraph.add_run(), " ADDIN EN.CITE real-citation ")
+        _field_marker(paragraph.add_run(), "separate")
+        paragraph.add_run("(Smith, 2024)")
+        _field_marker(paragraph.add_run(), "end")
+    elif layout == "nested_real_field":
+        _field_marker(paragraph.add_run(), "begin")
+        _field_marker(paragraph.add_run(), "separate")
+        paragraph.add_run("(PMID: 12345678)")
+        _add_word_field(paragraph, " ADDIN EN.CITE real-citation ", "(Smith, 2024)")
+        _field_marker(paragraph.add_run(), "end")
+    elif layout == "shared_nested_begins":
+        run = paragraph.add_run()
+        _field_marker(run, "begin")
+        _field_marker(run, "begin")
+        _field_marker(paragraph.add_run(), "separate")
+        paragraph.add_run("(PMID: 12345678)")
+        _field_marker(paragraph.add_run(), "end")
+        _field_instruction(paragraph.add_run(), " ADDIN EN.CITE real-citation ")
+        _field_marker(paragraph.add_run(), "separate")
+        paragraph.add_run("(Smith, 2024)")
+        _field_marker(paragraph.add_run(), "end")
+    elif layout in {"split_instruction", "spanning_paragraphs"}:
+        _field_marker(paragraph.add_run(), "begin")
+        for fragment in (" AD", "DIN EN.", "CITE real-citation "):
+            _field_instruction(paragraph.add_run(), fragment)
+        _field_marker(paragraph.add_run(), "separate")
+        if layout == "spanning_paragraphs":
+            paragraph = document.add_paragraph()
+        _add_codeless_field_shell(paragraph, "(PMID: 12345678)")
+        _field_marker(paragraph.add_run(), "end")
+    elif layout == "hyperlink_in_field":
+        _add_endnote_hyperlink_field(paragraph, "(PMID: 12345678)")
+    else:
+        first_field_run = len(paragraph.runs)
+        _add_word_field(paragraph, " ADDIN EN.CITE real-citation ", "(PMID: 12345678)")
+        hyperlink = OxmlElement("w:hyperlink")
+        hyperlink.set(qn("w:anchor"), "_ENREF_12")
+        for run in paragraph.runs[first_field_run:]:
+            hyperlink.append(run._r)
+        paragraph._p.append(hyperlink)
+    paragraph.add_run(" after.")
+    document.save(input_docx)
+    original_xml = Document(input_docx).element.body.xml
+
+    # Exercise replacement independently of scanning: neither may trust a
+    # wrapper merely because its visible text looks like an author's note.
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "New", "2025")},
+    )
+
+    assert Document(output_docx).element.body.xml == original_xml
+    assert result.replacements == []
+    assert scan_docx(input_docx).unique_pmids == []

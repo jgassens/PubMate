@@ -879,12 +879,21 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
 
     open_fields: list[dict[str, Any]] = []
     for record in records:
+        # A run may close one field and open another. Inserting after that
+        # run would put the replacement inside the new field. Likewise, two
+        # begins in one run share depth_before, so it cannot identify a
+        # top-level wrapper. Leave these ambiguous boundaries untouched.
+        ambiguous_boundary = len(record.field_types) > 1
+        for field in open_fields:
+            field["instruction"].append(record.instruction)
+            field["ambiguous_boundary"] |= ambiguous_boundary
         for field_type in record.field_types:
             if field_type == "begin":
                 open_fields.append(
                     {
                         "depth_before": record.depth_before,
-                        "instruction": [],
+                        "instruction": [record.instruction],
+                        "ambiguous_boundary": ambiguous_boundary,
                         "result_start": None,
                         "runs": [],
                     }
@@ -897,7 +906,6 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
                 if wrapper is not None:
                     wrappers.append(wrapper)
         if open_fields:
-            open_fields[-1]["instruction"].append(record.instruction)
             if open_fields[-1]["result_start"] is not None and record.end > record.start:
                 open_fields[-1]["runs"].append(record.run)
 
@@ -908,7 +916,11 @@ def _codeless_field_wrapper(
     field: dict[str, Any],
     end_record: _RunRecord,
 ) -> LockedCitationWrapper | None:
-    if field["result_start"] is None or field["depth_before"]:
+    if (
+        field["result_start"] is None
+        or field["depth_before"]
+        or field["ambiguous_boundary"]
+    ):
         return None
     if "".join(field["instruction"]).strip():
         return None
