@@ -59,18 +59,30 @@ step "Checking this machine"
 ok "macOS"
 
 # Reading a key out of the Keychain, and exporting the certificate through
-# Keychain Access, both need a desktop session that can show an Allow dialog.
-# Over SSH those prompts have nowhere to appear and quietly fail instead.
-if [[ -n "${SSH_CONNECTION:-}${SSH_TTY:-}${SSH_CLIENT:-}" ]]; then
-  die "This looks like an SSH session.
+# Keychain Access, both need a session that can show an Allow dialog. Asking
+# whether this is SSH is the wrong question: SSH_* variables survive in a
+# tmux or screen session that was first started remotely, and a plain local
+# shell can inherit them. launchctl reports the real session kind, which is
+# "Aqua" only for a desktop login that can actually draw a prompt.
+SESSION_KIND="$(launchctl managername 2>/dev/null || print unknown)"
+if [[ -n "${PUBMATE_SKIP_SESSION_CHECK:-}" ]]; then
+  warn "Session check skipped at your request."
+elif [[ "$SESSION_KIND" == "Aqua" ]]; then
+  ok "desktop session, permission prompts can appear"
+else
+  die "This session cannot show a permission prompt (launchctl says: $SESSION_KIND).
 
 Reading the Sparkle key and exporting the certificate both make macOS ask
-for permission, and that prompt cannot be shown over SSH, so it fails with
-no explanation.
+for permission. With no desktop session that prompt has nowhere to appear,
+so it fails with no explanation.
 
-Run this while sitting at the Mac, or through Screen Sharing."
+Run this at the Mac itself, or through Screen Sharing. A tmux or screen
+session started over SSH stays remote even when you reattach locally, so
+start a fresh terminal window rather than reusing one.
+
+If you are certain this session can show dialogs, re-run with:
+    PUBMATE_SKIP_SESSION_CHECK=1 macos/setup_ci_secrets.sh"
 fi
-ok "running on a desktop session"
 
 if ! command -v gh >/dev/null 2>&1; then
   die "The GitHub CLI is not installed. Install it, then re-run:
