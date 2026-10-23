@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -1009,22 +1010,25 @@ def _replace_locked_wrapper(
     if any(run._r.xpath(".//w:vanish") for run in wrapper.runs):
         return False
 
+    trailing = "".join(run.text for run in wrapper.runs)[end - wrapper.start :]
+    run_element = OxmlElement("w:r")
     cursor = wrapper.start
+    copied_properties = False
     for run in wrapper.runs:
         run_start = cursor
         run_end = cursor + len(run.text)
         cursor = run_end
-        if run_start >= end or run_end <= start:
+        if run_end <= start:
             continue
-        run.text = (
-            run.text[: max(0, start - run_start)] + run.text[max(0, end - run_start) :]
-        )
+        if not copied_properties and run_start < end:
+            if run._r.rPr is not None:
+                run_element.append(deepcopy(run._r.rPr))
+            copied_properties = True
+        # Keep leading whitespace in place; move trailing whitespace with
+        # the citation so it still separates the following manuscript text.
+        run.text = run.text[: max(0, start - run_start)]
 
-    run_element = OxmlElement("w:r")
-    text_element = OxmlElement("w:t")
-    text_element.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    text_element.text = replacement
-    run_element.append(text_element)
+    Run(run_element, wrapper.runs[0]._parent).text = replacement + trailing
     wrapper.insert_after.addnext(run_element)
     return True
 

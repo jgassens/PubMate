@@ -2309,3 +2309,63 @@ def test_unsafe_wrapper_layout_is_skipped_before_resolution(tmp_path: Path, layo
     scan = scan_docx(input_docx)
     assert scan.unique_pmids == []
     assert [entry["normalized"] for entry in scan.skipped_identifiers] == ["12345678"]
+
+
+@pytest.mark.parametrize("builder", [_add_codeless_field_shell, _add_bibliography_hyperlink])
+@pytest.mark.parametrize("whitespace", ["", " \t"])
+def test_lifted_citation_preserves_spacing_and_run_properties(
+    tmp_path: Path, builder, whitespace: str,
+) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    builder(paragraph, f"{whitespace}(PMID: 12345678){whitespace}")
+    mapped_runs = word_module._paragraph_text_runs(paragraph)
+    source = next(run for run, _ in mapped_runs if "PMID" in run.text)
+    source.bold = True
+    source.italic = True
+    source.font.superscript = True
+    properties_xml = source._r.rPr.xml
+    paragraph.add_run("after.")
+    document.save(input_docx)
+
+    replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Smith", "2024")},
+    )
+
+    output_paragraph = Document(output_docx).paragraphs[0]
+    assert output_paragraph.text == f"Before {whitespace}{{Smith, 2024, PMID-12345678}}{whitespace}after."
+    citation_run = next(run for run in output_paragraph.runs if "{Smith" in run.text)
+    assert citation_run._r.rPr is not None
+    assert citation_run._r.rPr.xml == properties_xml
+
+
+@pytest.mark.parametrize("first", [_add_codeless_field_shell, _add_bibliography_hyperlink])
+@pytest.mark.parametrize("last", [_add_codeless_field_shell, _add_bibliography_hyperlink])
+def test_two_wrappers_and_plain_note_keep_offsets_and_order(tmp_path: Path, first, last) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("α Before ")
+    first(paragraph, " (PMID: 12345678) ")
+    paragraph.add_run(" middle (PMID: 23456789) and ")
+    last(paragraph, "(PMID: 34567890)\t")
+    document.save(input_docx)
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={
+            pmid: PubMedRecord(pmid, author, "2024")
+            for pmid, author in [("12345678", "One"), ("23456789", "Two"), ("34567890", "Three")]
+        },
+    )
+
+    assert _read_paragraph_text(output_docx) == (
+        "α Before  {One, 2024, PMID-12345678}  middle "
+        "{Two, 2024, PMID-23456789} and {Three, 2024, PMID-34567890}\t"
+    )
+    assert len(result.replacements) == 3
