@@ -164,7 +164,12 @@ def process_document(
 
     if not scan_result.unique_identifiers:
         _write_report_if_enabled(report, report_file, options.write_report)
-        messages.append(_nothing_converted_message(scan_result.skipped_identifiers))
+        messages.append(
+            _nothing_converted_message(
+                scan_result.skipped_identifiers,
+                convert_locked_citations=options.convert_locked_citations,
+            )
+        )
         if options.write_report:
             messages.append(f"Wrote report: {report_file}")
         return ProcessingResult(0, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
@@ -598,7 +603,11 @@ _SKIP_REASON_TEXT = {
 }
 
 
-def _nothing_converted_message(skipped_identifiers: list[dict[str, Any]]) -> str:
+def _nothing_converted_message(
+    skipped_identifiers: list[dict[str, Any]],
+    *,
+    convert_locked_citations: bool,
+) -> str:
     """Explain why nothing was converted without claiming nothing was found.
 
     Reporting "no matching blocks" when identifiers were found and then
@@ -625,14 +634,22 @@ def _nothing_converted_message(skipped_identifiers: list[dict[str, Any]]) -> str
         + ". No Word or EndNote files were written."
     )
     if counts.get("locked_citation"):
-        # This conversion is on by default, so reaching here means it was
-        # switched off. Telling the user to enable a feature they already
-        # have sends them looking in the wrong place.
-        message += (
-            " Converting identifiers inside existing EndNote citations is currently "
-            "turned off. Remove --no-convert-locked-citations, or tick \"Convert "
-            "PMID/DOI notes stuck inside existing EndNote citations\" in Settings."
-        )
+        # Whether a setting would help depends on the setting. With conversion
+        # already on, these sit in citations EndNote owns, or in hidden text,
+        # and no option converts them; naming one sends the user to a
+        # checkbox that is already ticked.
+        if convert_locked_citations:
+            message += (
+                " These sit inside citations EndNote owns, or in hidden text, and "
+                "cannot be converted without damaging them. Move the note outside "
+                "the citation in Word and run PubMate again."
+            )
+        else:
+            message += (
+                " Converting identifiers inside existing EndNote citations is currently "
+                "turned off. Remove --no-convert-locked-citations, or tick \"Convert "
+                "PMID/DOI notes stuck inside existing EndNote citations\" in Settings."
+            )
     return message
 
 

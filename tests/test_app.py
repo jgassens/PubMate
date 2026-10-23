@@ -368,7 +368,6 @@ def test_nothing_converted_message_reports_what_was_found(tmp_path: Path) -> Non
     assert "Found 1 PMID/DOI identifier but converted none" in message
     assert "inside an existing EndNote citation or link" in message
     assert "--no-convert-locked-citations" in message
-    assert "currently\n        turned off" not in message  # single-line phrasing
     assert "No matching PMID or DOI blocks were found" not in message
 
 
@@ -390,3 +389,49 @@ def test_document_with_no_identifiers_still_says_none_were_found(tmp_path: Path)
         "No matching PMID or DOI blocks were found" in message
         for message in result.messages
     )
+
+
+def test_real_endnote_citation_skip_does_not_blame_a_setting(tmp_path: Path) -> None:
+    """With conversion already on, no setting would convert these.
+
+    Naming one sends the user to a checkbox that is already ticked, which is
+    the same wrong-turn the old "nothing was found" message caused.
+    """
+
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    input_docx = tmp_path / "input.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Lead text. ")
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    paragraph.add_run()._r.append(begin)
+    instruction = OxmlElement("w:instrText")
+    instruction.set(qn("xml:space"), "preserve")
+    instruction.text = " ADDIN EN.CITE real-citation "
+    paragraph.add_run()._r.append(instruction)
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    paragraph.add_run()._r.append(separate)
+    paragraph.add_run("(PMID: 12345678)")
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    paragraph.add_run()._r.append(end)
+    document.save(input_docx)
+
+    result = process_document(
+        ProcessingOptions(
+            input_docx=input_docx,
+            email="someone@example.edu",
+            save_email=False,
+            write_report=False,
+            write_nbib=False,
+        )
+    )
+
+    message = " ".join(result.messages)
+    assert "Found 1 PMID/DOI identifier but converted none" in message
+    assert "cannot be converted without damaging them" in message
+    assert "currently turned off" not in message
+    assert "--no-convert-locked-citations" not in message
