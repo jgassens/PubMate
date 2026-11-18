@@ -19,13 +19,15 @@ def write_enw(records: list[ReferenceRecord]) -> str:
 
 
 def _record_to_enw(record: ReferenceRecord) -> str:
-    lines: list[str] = ["%0 Journal Article"]
+    lines: list[str] = [f"%0 {record.reference_type}"]
     for author in record.authors or ((record.first_author,) if record.first_author else ()):
         if author:
             lines.append(f"%A {_sanitize_field(author)}")
     _append(lines, "%D", record.year)
     _append(lines, "%T", record.title)
     _append(lines, "%J", record.journal)
+    _append(lines, "%B", record.book_title)
+    _append(lines, "%I", record.publisher)
     _append(lines, "%V", record.volume)
     _append(lines, "%N", record.issue)
     _append(lines, "%P", record.pages)

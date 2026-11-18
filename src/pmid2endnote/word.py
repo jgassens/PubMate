@@ -12,6 +12,7 @@ from typing import Any, Literal, Protocol, TypeVar
 
 from docx import Document
 from docx.document import Document as DocxDocument
+from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.table import Table
@@ -24,7 +25,9 @@ from pmid2endnote.models import IdentifierKind, ReferenceRecord
 from pmid2endnote.pubmed import PubMedRecord
 from pmid2endnote.references import reference_from_pubmed
 from pmid2endnote.scanner import (
+    HTTP_URL_RE,
     IdentifierBlock,
+    citation_link_identifier,
     extract_unique_identifiers,
     extract_unique_pmids,
     scan_text,
@@ -96,6 +99,22 @@ class ReplacementBlock:
     def kind(self) -> str:
         kinds = {kind for kind, _ in self.identifier_keys}
         return next(iter(kinds)) if len(kinds) == 1 else "mixed"
+
+
+@dataclass(frozen=True)
+class PlacedCitation:
+    """The visible range of one or more newly written temporary citations."""
+
+    start: int
+    end: int
+    reports: tuple[dict[str, Any], ...]
+
+    @property
+    def text(self) -> str:
+        parts = dict.fromkeys(
+            part for report in self.reports for part in report["replacement_text"][1:-1].split(";")
+        )
+        return "{" + ";".join(parts) + "}"
 
 
 @dataclass(frozen=True)
@@ -230,15 +249,19 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
     context = _reference_section_context(document, options)
     field_depth_cache: FieldDepthCache = {}
 
-    for item in context.paragraphs:
-        paragraph = item.paragraph
-        location = item.location
-        blocks = scan_text(
-            paragraph.text,
-            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-            scan_dois=options.scan_dois,
-            scan_bare_dois=options.scan_bare_dois,
+    paragraphs = list(context.paragraphs)
+    if options.include_comments:
+        paragraphs.extend(
+            ScannableParagraph(paragraph, location, location.comment_id in context.skipped_comment_ids)
+            for paragraph, location in _iter_comment_paragraphs(document, options)
         )
+    paragraphs.extend(
+        ScannableParagraph(paragraph, location)
+        for paragraph, location in _iter_header_footer_paragraphs(document, options)
+    )
+    for item in paragraphs:
+        paragraph, location = item.paragraph, item.location
+        blocks, citation_links = _scan_paragraph(paragraph, options, field_depth_cache)
         if not blocks:
             continue
         if item.skipped_by_reference_section:
@@ -246,125 +269,14 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
                 _skipped_identifier_reports(blocks, location, reason="reference_section")
             )
             continue
-        replacement_blocks = _replacement_blocks_for_text(
-            paragraph.text,
-            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-            scan_dois=options.scan_dois,
-            scan_bare_dois=options.scan_bare_dois,
-        )
-        (
-            replacement_blocks,
-            field_or_hidden_blocks,
-            tracked_change_blocks,
-            non_text_blocks,
-        ) = _partition_blocks_around_unsafe_content(
-            paragraph,
-            replacement_blocks,
-            field_depth_cache,
-            convert_locked_citations=options.convert_locked_citations,
-        )
-        if field_or_hidden_blocks:
-            warnings.append(
-                _unsafe_content_warning(location, len(field_or_hidden_blocks))
-            )
-        if non_text_blocks:
-            warnings.append(
-                _non_text_content_warning(location, len(non_text_blocks))
-            )
-        if tracked_change_blocks:
-            warnings.append(
-                _tracked_change_warning(location, len(tracked_change_blocks))
-            )
-        skipped_identifiers.extend(
-            _skipped_replacement_reports(
-                field_or_hidden_blocks,
-                tracked_change_blocks,
-                non_text_blocks,
-                location,
-            )
-        )
-        occurrences.extend(
-            DocumentPmidOccurrence(block=block, location=location)
-            for replacement_block in replacement_blocks
-            for block in replacement_block.blocks
-        )
-
-    if options.include_comments:
-        for paragraph, location in _iter_comment_paragraphs(document, options):
-            blocks = scan_text(
-                paragraph.text,
-                scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-                scan_dois=options.scan_dois,
-                scan_bare_dois=options.scan_bare_dois,
-            )
-            if not blocks:
-                continue
-            if location.comment_id in context.skipped_comment_ids:
-                skipped_identifiers.extend(
-                    _skipped_identifier_reports(blocks, location, reason="reference_section")
-                )
-                continue
-            if not _comment_anchor_is_safe(context, location.comment_id, field_depth_cache):
-                skipped_identifiers.extend(
-                    _skipped_identifier_reports(blocks, location, reason="unsafe_comment_anchor")
-                )
-                warnings.append(_unsafe_comment_anchor_warning(location.comment_id))
-                continue
-            replacement_blocks = _replacement_blocks_for_text(
-                paragraph.text,
-                scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-                scan_dois=options.scan_dois,
-                scan_bare_dois=options.scan_bare_dois,
-            )
-            (
-                replacement_blocks,
-                field_or_hidden_blocks,
-                tracked_change_blocks,
-                _,
-            ) = _partition_blocks_around_unsafe_content(
-                paragraph,
-                replacement_blocks,
-                field_depth_cache,
-                check_run_editability=False,
-                convert_locked_citations=options.convert_locked_citations,
-            )
-            if field_or_hidden_blocks:
-                warnings.append(
-                    _unsafe_content_warning(location, len(field_or_hidden_blocks))
-                )
-            if tracked_change_blocks:
-                warnings.append(
-                    _tracked_change_warning(location, len(tracked_change_blocks))
-                )
+        in_comment = location.comment_id is not None
+        if in_comment and not _comment_anchor_is_safe(context, location.comment_id, field_depth_cache):
             skipped_identifiers.extend(
-                _skipped_replacement_reports(
-                    field_or_hidden_blocks,
-                    tracked_change_blocks,
-                    [],  # Comment text is read for insertion at its anchor.
-                    location,
-                )
+                _skipped_identifier_reports(blocks, location, reason="unsafe_comment_anchor")
             )
-            occurrences.extend(
-                DocumentPmidOccurrence(block=block, location=location)
-                for replacement_block in replacement_blocks
-                for block in replacement_block.blocks
-            )
-
-    for paragraph, location in _iter_header_footer_paragraphs(document, options):
-        blocks = scan_text(
-            paragraph.text,
-            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-            scan_dois=options.scan_dois,
-            scan_bare_dois=options.scan_bare_dois,
-        )
-        if not blocks:
+            warnings.append(_unsafe_comment_anchor_warning(location.comment_id))
             continue
-        replacement_blocks = _replacement_blocks_for_text(
-            paragraph.text,
-            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-            scan_dois=options.scan_dois,
-            scan_bare_dois=options.scan_bare_dois,
-        )
+        replacement_blocks = _replacement_blocks_for_text(paragraph.text, blocks)
         (
             replacement_blocks,
             field_or_hidden_blocks,
@@ -375,6 +287,8 @@ def scan_docx(path: Path, options: ReplacementOptions | None = None) -> ScanResu
             replacement_blocks,
             field_depth_cache,
             convert_locked_citations=options.convert_locked_citations,
+            check_run_editability=not in_comment,
+            citation_links=citation_links,
         )
         if field_or_hidden_blocks:
             warnings.append(
@@ -461,14 +375,8 @@ def replace_pmids_in_docx(
             paragraph=item.paragraph,
             location=item.location,
             records_by_identifier=resolved_records,
-            keep_pmid_text=options.keep_pmid_text,
-            mark_unresolved=options.mark_unresolved,
-            dry_run=options.dry_run,
-            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-            scan_dois=options.scan_dois,
-            scan_bare_dois=options.scan_bare_dois,
+            options=options,
             field_depth_cache=field_depth_cache,
-            convert_locked_citations=options.convert_locked_citations,
         )
         replacements.extend(paragraph_replacements)
         warnings.extend(paragraph_warnings)
@@ -489,14 +397,8 @@ def replace_pmids_in_docx(
             paragraph=paragraph,
             location=location,
             records_by_identifier=resolved_records,
-            keep_pmid_text=options.keep_pmid_text,
-            mark_unresolved=options.mark_unresolved,
-            dry_run=options.dry_run,
-            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-            scan_dois=options.scan_dois,
-            scan_bare_dois=options.scan_bare_dois,
+            options=options,
             field_depth_cache=field_depth_cache,
-            convert_locked_citations=options.convert_locked_citations,
         )
         replacements.extend(paragraph_replacements)
         warnings.extend(paragraph_warnings)
@@ -685,6 +587,7 @@ def _partition_blocks_around_unsafe_content(
     *,
     convert_locked_citations: bool,
     check_run_editability: bool = True,
+    citation_links: dict[tuple[int, int], LockedCitationWrapper] | None = None,
 ) -> tuple[list[TextRangeT], list[TextRangeT], list[TextRangeT], list[TextRangeT]]:
     """Keep blocks outside Word fields/hidden runs and reject overlapping blocks.
 
@@ -716,9 +619,11 @@ def _partition_blocks_around_unsafe_content(
     non_text: list[TextRangeT] = []
     for block in blocks:
         if _range_overlaps_any(block.start, block.end, unsafe_ranges):
-            if _block_is_explicitly_labeled(block) and _locked_wrapper_for_range(
+            is_citation_link = citation_links and (block.start, block.end) in citation_links
+            is_locked_wrapper = _block_is_explicitly_labeled(block) and _locked_wrapper_for_range(
                 locked_wrappers, text, block.start, block.end
-            ) is not None and not _identifier_touches_omitted_content(
+            ) is not None
+            if (is_citation_link or is_locked_wrapper) and not _identifier_touches_omitted_content(
                 paragraph,
                 mapped_runs,
                 block.start,
@@ -807,7 +712,9 @@ class LockedCitationWrapper:
     end: int
     runs: tuple[Run, ...]
     insert_after: Any
-    kind: Literal["hyperlink", "codeless_field"]
+    kind: Literal["hyperlink", "codeless_field", "citation_link"]
+    url: str | None = None
+    field_start: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -873,7 +780,9 @@ def _hyperlink_ancestor(element: Any, paragraph: Paragraph) -> Any | None:
     return None
 
 
-def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationWrapper]:
+def _locked_citation_wrappers(
+    records: list[_RunRecord], *, external_in: Paragraph | None = None
+) -> list[LockedCitationWrapper]:
     """Return leftover EndNote wrappers whose text may be safely lifted out.
 
     A complex field is only eligible when its instruction is blank. Real
@@ -898,7 +807,16 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
         # Only an internal cross-reference, which is what EndNote leaves
         # behind. An author's own link to a web page can have a PMID as its
         # visible text, and blanking that would destroy a working link.
-        if hyperlink.get(qn("w:anchor")) is None or hyperlink.get(qn("r:id")) is not None:
+        url = None
+        if external_in is not None:
+            rel_id = hyperlink.get(qn("r:id"))
+            rel = external_in.part.rels.get(rel_id) if rel_id else None
+            if rel is None or not rel.is_external or rel.reltype != RELATIONSHIP_TYPE.HYPERLINK:
+                continue
+            if any(child.tag not in {qn("w:r"), qn("w:proofErr")} for child in hyperlink):
+                continue
+            url = rel.target_ref
+        elif hyperlink.get(qn("w:anchor")) is None or hyperlink.get(qn("r:id")) is not None:
             continue
         if any(
             child.tag != qn("w:r") and child.tag not in _HARMLESS_PARAGRAPH_MARKERS
@@ -915,7 +833,8 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
                     end=group[-1].end,
                     runs=runs,
                     insert_after=hyperlink,
-                    kind="hyperlink",
+                    kind="citation_link" if url else "hyperlink",
+                    url=url,
                 )
             )
 
@@ -930,7 +849,9 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
         )
         for field in open_fields:
             field["instruction"].append(record.instruction)
-            field["ambiguous_boundary"] |= ambiguous_boundary
+            field["ambiguous_boundary"] |= ambiguous_boundary or (
+                external_in is not None and "begin" in record.field_types
+            )
         for field_type in record.field_types:
             if field_type == "begin":
                 open_fields.append(
@@ -947,19 +868,21 @@ def _locked_citation_wrappers(records: list[_RunRecord]) -> list[LockedCitationW
                 open_fields[-1]["result_start"] = record.end
             elif field_type == "end" and open_fields:
                 field = open_fields.pop()
-                wrapper = _codeless_field_wrapper(field, record)
+                wrapper = _complex_field_wrapper(field, record, external=external_in is not None)
                 if wrapper is not None:
                     wrappers.append(wrapper)
         for field in open_fields:
-            if field["result_start"] is not None and record.end > record.start:
+            if field["result_start"] is not None and not record.field_types:
                 field["runs"].append(record.run)
 
     return wrappers
 
 
-def _codeless_field_wrapper(
+def _complex_field_wrapper(
     field: dict[str, Any],
     end_record: _RunRecord,
+    *,
+    external: bool,
 ) -> LockedCitationWrapper | None:
     if (
         field["result_start"] is None
@@ -967,7 +890,14 @@ def _codeless_field_wrapper(
         or field["ambiguous_boundary"]
     ):
         return None
-    if "".join(field["instruction"]).strip():
+    instruction = "".join(field["instruction"]).strip()
+    url = None
+    if external:
+        match = re.fullmatch(r'HYPERLINK\s+"([^"\r\n]+)"(?:\s+\\h)?', instruction, re.I)
+        if match is None:
+            return None
+        url = match[1]
+    elif instruction:
         return None
     runs: list[Run] = field["runs"]
     if not runs:
@@ -979,8 +909,9 @@ def _codeless_field_wrapper(
         or field["begin_run"].getparent() is not parent
     ):
         return None
-    # Field markers may be interleaved with result runs, but a hyperlink,
-    # tracked change, drawing, or other omitted content is not an empty shell.
+    # An external field is removed as a unit. Keep fields that contain a
+    # range marker so the replacement cannot detach a comment or bookmark.
+    allowed_markers = {qn("w:proofErr")} if external else _HARMLESS_PARAGRAPH_MARKERS
     for element in parent[parent.index(field["begin_run"]) : parent.index(end_record.run._r) + 1]:
         if element.tag == qn("w:r"):
             if not _run_element_has_only_safe_children(element) and not all(
@@ -988,7 +919,7 @@ def _codeless_field_wrapper(
                 for child in element
             ):
                 return None
-        elif element.tag not in _HARMLESS_PARAGRAPH_MARKERS:
+        elif element.tag not in allowed_markers:
             return None
     start = int(field["result_start"])
     if start + sum(len(run.text) for run in runs) != end_record.start:
@@ -998,8 +929,89 @@ def _codeless_field_wrapper(
         end=end_record.start,
         runs=tuple(runs),
         insert_after=end_record.run._r,
-        kind="codeless_field",
+        kind="citation_link" if external else "codeless_field",
+        url=url,
+        field_start=field["begin_run"] if external else None,
     )
+
+
+def _scan_paragraph(
+    paragraph: Paragraph, options: ReplacementOptions, field_depth_cache: FieldDepthCache
+) -> tuple[list[IdentifierBlock], dict[tuple[int, int], LockedCitationWrapper]]:
+    text = paragraph.text
+    blocks = scan_text(
+        text,
+        scan_parenthetical_pmids=options.scan_parenthetical_pmids,
+        scan_dois=options.scan_dois,
+        scan_bare_dois=options.scan_bare_dois,
+    )
+    citation_links: dict[tuple[int, int], LockedCitationWrapper] = {}
+    linked_blocks: list[IdentifierBlock] = []
+    mapped_runs = _paragraph_text_runs(paragraph) if text else None
+    if mapped_runs is not None:
+        records = _run_records(paragraph, mapped_runs, field_depth_cache)
+        for wrapper in _locked_citation_wrappers(records, external_in=paragraph):
+            start, end = wrapper.start, wrapper.end
+            label = text[start:end]
+            if not label.strip() or not wrapper.url:
+                continue
+            if _locked_wrapper_for_range([wrapper], text, start, end) is None:
+                continue
+            identifier = citation_link_identifier(wrapper.url, label, scan_dois=options.scan_dois)
+            if identifier is None:
+                continue
+            kind, value = identifier
+            citation_links[start, end] = wrapper
+            linked_blocks.append(IdentifierBlock(label, (value,), start, end, kind, "citation_link"))
+
+    for match in HTTP_URL_RE.finditer(text):
+        # An identifier embedded in a URL is part of that URL, including
+        # when the URL itself has no supported metadata provider.
+        blocks = [block for block in blocks if not match.start() < block.start < match.end()]
+        url = match[0].rstrip(".,;")
+        while url and url[-1] in ")]" and url.count(url[-1]) > url.count({")": "(", "]": "["}[url[-1]]):
+            url = url[:-1]
+        start, end = match.start(), match.start() + len(url)
+        if any(start < block.end and end > block.start for block in (*blocks, *linked_blocks)):
+            continue
+        identifier = citation_link_identifier(url, scan_dois=options.scan_dois)
+        if identifier is None:
+            continue
+        kind, value = identifier
+        closing = {"(": ")", "[": "]"}.get(text[start - 1:start])
+        if kind == "url" and text[end:end + 1] != closing:
+            continue
+        blocks.append(IdentifierBlock(url, (value,), start, end, kind, "citation_url"))
+
+    blocks = [block for block in blocks if not any(
+        block.start < linked.end and block.end > linked.start for linked in linked_blocks
+    )]
+    return sorted([*blocks, *linked_blocks], key=lambda block: block.start), citation_links
+
+
+def _replace_citation_link(wrapper: LockedCitationWrapper, replacement: str) -> None:
+    """Replace a citation-only link or HYPERLINK field with ordinary Word text."""
+
+    anchor = wrapper.insert_after
+    parent = anchor.getparent()
+    run_element = OxmlElement("w:r")
+    properties = wrapper.runs[0]._r.rPr
+    if properties is not None:
+        run_element.append(deepcopy(properties))
+    run = Run(run_element, wrapper.runs[0]._parent)
+    if run.style.style_id == "Hyperlink":
+        run.style = None
+    original = "".join(item.text for item in wrapper.runs)
+    leading = original[:len(original) - len(original.lstrip())]
+    trailing = original[len(original.rstrip()):]
+    run.text = leading + replacement + trailing
+    anchor.addnext(run_element)
+    if wrapper.field_start is None:
+        parent.remove(anchor)
+        return
+    for element in parent[parent.index(wrapper.field_start):parent.index(anchor) + 1]:
+        if element.tag == qn("w:r"):
+            parent.remove(element)
 
 
 _LABELED_IDENTIFIER_SOURCES = frozenset({"labeled", "doi_label", "doi_url"})
@@ -1450,31 +1462,14 @@ def _replace_paragraph_blocks(
     paragraph: Paragraph,
     location: TextLocation,
     records_by_identifier: dict[IdentifierKey, ReferenceRecord],
-    keep_pmid_text: bool,
-    mark_unresolved: bool,
-    dry_run: bool,
-    scan_parenthetical_pmids: bool,
-    scan_dois: bool,
-    scan_bare_dois: bool,
+    options: ReplacementOptions,
     field_depth_cache: FieldDepthCache,
-    convert_locked_citations: bool,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    text = paragraph.text
-    blocks = scan_text(
-        text,
-        scan_parenthetical_pmids=scan_parenthetical_pmids,
-        scan_dois=scan_dois,
-        scan_bare_dois=scan_bare_dois,
-    )
+    blocks, citation_links = _scan_paragraph(paragraph, options, field_depth_cache)
     if not blocks:
         return [], []
 
-    replacement_blocks = _replacement_blocks_for_text(
-        text,
-        scan_parenthetical_pmids=scan_parenthetical_pmids,
-        scan_dois=scan_dois,
-        scan_bare_dois=scan_bare_dois,
-    )
+    replacement_blocks = _replacement_blocks_for_text(paragraph.text, blocks, records_by_identifier)
     (
         replacement_blocks,
         field_or_hidden_blocks,
@@ -1484,10 +1479,10 @@ def _replace_paragraph_blocks(
         paragraph,
         replacement_blocks,
         field_depth_cache,
-        convert_locked_citations=convert_locked_citations,
+        convert_locked_citations=options.convert_locked_citations,
+        citation_links=citation_links,
     )
     planned: list[tuple[ReplacementBlock, str, dict[str, Any]]] = []
-    report_replacements: list[dict[str, Any]] = []
     warnings = (
         [_unsafe_content_warning(location, len(field_or_hidden_blocks))]
         if field_or_hidden_blocks
@@ -1502,8 +1497,8 @@ def _replace_paragraph_blocks(
         replacement_text = _replacement_for_block(
             block=block,
             records_by_identifier=records_by_identifier,
-            keep_pmid_text=keep_pmid_text,
-            mark_unresolved=mark_unresolved,
+            keep_pmid_text=options.keep_pmid_text,
+            mark_unresolved=options.mark_unresolved,
         )
         if replacement_text is None:
             identifier_label = _replacement_block_label(block)
@@ -1523,36 +1518,119 @@ def _replace_paragraph_blocks(
             "location": location.as_report_dict(),
         }
         planned.append((block, replacement_text, report))
-        if dry_run:
-            report_replacements.append(report)
 
-    if not dry_run:
-        applied_reports: list[dict[str, Any]] = []
-        application_warnings: list[str] = []
-        for block, replacement_text, report in sorted(
-            planned,
-            key=lambda item: item[0].start,
-            reverse=True,
+    # Both runs edit the in-memory document so the dry-run report reflects the
+    # same Word layout checks. The caller only saves a non-dry run.
+    applied: list[tuple[int, int, dict[str, Any], int]] = []
+    application_warnings: list[str] = []
+    for block, replacement_text, report in reversed(planned):
+        before_length = len(paragraph.text)
+        citation_link = citation_links.get((block.start, block.end))
+        start = block.start
+        if citation_link is not None:
+            _replace_citation_link(citation_link, replacement_text)
+            start += len(block.original_text) - len(block.original_text.lstrip())
+        elif not _replace_paragraph_range(
+            paragraph,
+            start,
+            block.end,
+            replacement_text,
+            convert_locked_citations=options.convert_locked_citations,
+            field_depth_cache=field_depth_cache,
         ):
-            if _replace_paragraph_range(
-                paragraph,
-                block.start,
-                block.end,
-                replacement_text,
-                convert_locked_citations=convert_locked_citations,
-                field_depth_cache=field_depth_cache,
-            ):
-                applied_reports.append(report)
-            else:
-                application_warnings.append(
-                    f"Could not apply replacement at {location.part} paragraph "
-                    f"{location.paragraph_index}; left original text unchanged: "
-                    f"{block.original_text}"
-                )
-        report_replacements.extend(reversed(applied_reports))
-        warnings.extend(reversed(application_warnings))
+            application_warnings.append(
+                f"Could not apply replacement at {location.part} paragraph "
+                f"{location.paragraph_index}; left original text unchanged: "
+                f"{block.original_text}"
+            )
+            continue
+        applied.append((start, start + len(replacement_text), report, len(paragraph.text) - before_length))
 
-    return report_replacements, warnings
+    citations: list[PlacedCitation] = []
+    reports: list[dict[str, Any]] = []
+    offset = 0
+    for start, end, report, length_change in reversed(applied):
+        reports.append(report)
+        if re.fullmatch(r"\{[^{}]+\}", report["replacement_text"]):
+            citations.append(PlacedCitation(start + offset, end + offset, (report,)))
+        offset += length_change
+    warnings.extend(reversed(application_warnings))
+    if citations and not _place_citations_after_punctuation(paragraph, citations, field_depth_cache):
+        warnings.append(
+            f"Could not adjust citation punctuation in {location.part} paragraph "
+            f"{location.paragraph_index} because it crosses protected Word content."
+        )
+    return reports, warnings
+
+
+def _place_citations_after_punctuation(
+    paragraph: Paragraph, citations: list[PlacedCitation], field_depth_cache: FieldDepthCache
+) -> bool:
+    """Consume citation-only delimiters and move adjacent punctuation ahead of citations."""
+
+    text = paragraph.text
+    # Mask the known citations so parentheses in author names do not affect
+    # recognition of the manuscript's surrounding delimiters.
+    masked = list(text)
+    for citation in citations:
+        masked[citation.start:citation.end] = "x" * (citation.end - citation.start)
+
+    wrappers = list(_identifier_only_wrappers("".join(masked)))
+    paired_openings = {start for start, _ in wrappers}
+    paired_closings = {end - 1 for _, end in wrappers}
+    groups = list(citations)
+    for start, end in wrappers:
+        inside = tuple(cite for cite in groups if start < cite.start and cite.end < end)
+        if inside and _wrapper_contains_only_identifiers(text, start, end, inside):
+            groups = [cite for cite in groups if cite not in inside]
+            reports = tuple(report for cite in sorted(inside, key=lambda cite: cite.start) for report in cite.reports)
+            groups.append(PlacedCitation(start, end, reports))
+
+    # Adjacent citation-only groups share a single spot after punctuation.
+    clusters: list[PlacedCitation] = []
+    for group in sorted(groups, key=lambda cite: cite.start):
+        start, end = group.start, group.end
+        if start in paired_openings and end - 1 in paired_closings:
+            # A duplicated delimiter next to a complete citation wrapper is
+            # part of that wrapper when it has no matching delimiter of its own.
+            while start > 0 and text[start - 1] == text[group.start] and start - 1 not in paired_openings:
+                start -= 1
+            while end < len(text) and text[end] == text[group.end - 1] and end not in paired_closings:
+                end += 1
+            group = PlacedCitation(start, end, group.reports)
+        if clusters and re.fullmatch(r"[ \t\u00a0]*[,;]?[ \t\u00a0]*", text[clusters[-1].end:group.start]):
+            previous = clusters.pop()
+            group = PlacedCitation(previous.start, group.end, previous.reports + group.reports)
+        clusters.append(group)
+
+    complete = True
+    for group in reversed(clusters):
+        start, end = group.start, group.end
+        trailing = re.match(r"[ \t\u00a0]*([.,;:!?]+)", text[end:])
+        punctuation = trailing[1] if trailing else ""
+        if trailing:
+            end += trailing.end()
+        left = len(text[:start].rstrip(" \t\u00a0"))
+        if left and (trailing or text[start] in "([" or text[left - 1] in ".,;:!?"):
+            start = left
+            if punctuation and text[:left].endswith(punctuation):
+                punctuation = ""
+        citation_text = group.text
+        replacement = punctuation + citation_text
+        if replacement == text[start:end]:
+            continue
+        layout = PlacedCitation(start, end, group.reports)
+        safe, *_ = _partition_blocks_around_unsafe_content(
+            paragraph, [layout], field_depth_cache, convert_locked_citations=False
+        )
+        if not safe or not _replace_paragraph_range(
+            paragraph, start, end, replacement, convert_locked_citations=False,
+        ):
+            complete = False
+            continue
+        for report in group.reports:
+            report["replacement_text"] = citation_text
+    return complete
 
 
 def _insert_comment_pmids_at_anchors(
@@ -1570,12 +1648,8 @@ def _insert_comment_pmids_at_anchors(
     for paragraph, comment_location in _iter_comment_paragraphs(document, options):
         if comment_location.comment_id in context.skipped_comment_ids:
             continue
-        blocks = _replacement_blocks_for_text(
-            paragraph.text,
-            scan_parenthetical_pmids=options.scan_parenthetical_pmids,
-            scan_dois=options.scan_dois,
-            scan_bare_dois=options.scan_bare_dois,
-        )
+        identifiers, citation_links = _scan_paragraph(paragraph, options, field_depth_cache)
+        blocks = _replacement_blocks_for_text(paragraph.text, identifiers, records_by_identifier)
         if not blocks:
             continue
         if not _comment_anchor_is_safe(context, comment_location.comment_id, field_depth_cache):
@@ -1592,6 +1666,7 @@ def _insert_comment_pmids_at_anchors(
             field_depth_cache,
             check_run_editability=False,
             convert_locked_citations=options.convert_locked_citations,
+            citation_links=citation_links,
         )
         if field_or_hidden_blocks:
             warnings.append(
@@ -1739,9 +1814,12 @@ def _replacement_for_block(
     keep_pmid_text: bool,
     mark_unresolved: bool,
 ) -> str | None:
+    if any(_is_unresolved_url(item, records_by_identifier) for item in block.blocks):
+        return None
+
     resolved_records: list[ReferenceRecord] = []
     seen_record_keys: set[str] = set()
-    unresolved_by_kind: dict[IdentifierKind, list[str]] = {"pmid": [], "doi": []}
+    unresolved_by_kind: dict[IdentifierKind, list[str]] = {"pmid": [], "doi": [], "url": []}
 
     for identifier_key in block.identifier_keys:
         record = records_by_identifier.get(identifier_key)
@@ -1776,21 +1854,19 @@ def _replacement_for_block(
 
 def _replacement_blocks_for_text(
     text: str,
-    *,
-    scan_parenthetical_pmids: bool,
-    scan_dois: bool,
-    scan_bare_dois: bool,
+    identifier_blocks: list[IdentifierBlock],
+    records_by_identifier: dict[IdentifierKey, ReferenceRecord] | None = None,
 ) -> list[ReplacementBlock]:
-    identifier_blocks = scan_text(
-        text,
-        scan_parenthetical_pmids=scan_parenthetical_pmids,
-        scan_dois=scan_dois,
-        scan_bare_dois=scan_bare_dois,
-    )
     if not identifier_blocks:
         return []
 
     grouped: list[ReplacementBlock] = []
+    standalone = {
+        block for block in identifier_blocks
+        if block.source in {"citation_link", "citation_url"} or (
+            records_by_identifier is not None and _is_unresolved_url(block, records_by_identifier)
+        )
+    }
     used_block_indexes: set[int] = set()
     for start, end in _identifier_only_wrappers(text):
         inside_indexes = [
@@ -1801,6 +1877,8 @@ def _replacement_blocks_for_text(
         if not inside_indexes or any(index in used_block_indexes for index in inside_indexes):
             continue
         inside_blocks = tuple(identifier_blocks[index] for index in inside_indexes)
+        if any(block in standalone for block in inside_blocks):
+            continue
         if not _wrapper_contains_only_identifiers(text, start, end, inside_blocks):
             continue
         grouped.append(
@@ -1814,7 +1892,7 @@ def _replacement_blocks_for_text(
         )
         used_block_indexes.update(inside_indexes)
 
-    for run in _adjacent_identifier_runs(text, identifier_blocks, used_block_indexes):
+    for run in _adjacent_identifier_runs(text, identifier_blocks, used_block_indexes, standalone):
         if len(run) > 1:
             grouped.append(
                 ReplacementBlock(
@@ -1841,16 +1919,24 @@ def _replacement_blocks_for_text(
 
 
 def _identifier_only_wrappers(text: str) -> Iterator[tuple[int, int]]:
-    for match in re.finditer(r"\[[^\[\]]+\]", text):
-        yield match.start(), match.end()
-    for match in re.finditer(r"\([^()]+\)", text):
-        yield match.start(), match.end()
+    closing = {"(": ")", "[": "]"}
+    pending: list[tuple[str, int]] = []
+    for match in re.finditer(r"[\[\]()]", text):
+        delimiter = match[0]
+        if delimiter in closing:
+            pending.append((closing[delimiter], match.start()))
+        elif pending and pending[-1][0] == delimiter:
+            _, start = pending.pop()
+            yield start, match.end()
+        else:
+            pending.clear()
 
 
 def _adjacent_identifier_runs(
     text: str,
     blocks: list[IdentifierBlock],
     used_block_indexes: set[int],
+    standalone: set[IdentifierBlock],
 ) -> Iterator[list[IdentifierBlock]]:
     available = [
         block for index, block in enumerate(blocks)
@@ -1862,7 +1948,10 @@ def _adjacent_identifier_runs(
     run = [available[0]]
     for block in available[1:]:
         separator = text[run[-1].end : block.start]
-        if _should_group_adjacent(run[-1], block) and re.fullmatch(r"[\s,;]+", separator or ""):
+        if (
+            all(item.source != "parenthetical" and item not in standalone for item in (run[-1], block))
+            and re.fullmatch(r"[\s,;]+", separator)
+        ):
             run.append(block)
             continue
         yield run
@@ -1870,8 +1959,10 @@ def _adjacent_identifier_runs(
     yield run
 
 
-def _should_group_adjacent(left: IdentifierBlock, right: IdentifierBlock) -> bool:
-    return left.source != "parenthetical" and right.source != "parenthetical"
+def _is_unresolved_url(block: IdentifierBlock, records: dict[IdentifierKey, ReferenceRecord]) -> bool:
+    return block.is_url and any(
+        (block.kind, identifier) not in records for identifier in block.identifiers
+    )
 
 
 def _block_inside_wrapper(block: IdentifierBlock, start: int, end: int) -> bool:
@@ -1882,7 +1973,7 @@ def _wrapper_contains_only_identifiers(
     text: str,
     start: int,
     end: int,
-    blocks: tuple[IdentifierBlock, ...],
+    blocks: tuple[TextRange, ...],
 ) -> bool:
     inner_start = start + 1
     inner_end = end - 1
@@ -1919,6 +2010,8 @@ def _replacement_block_label(block: ReplacementBlock) -> str:
         return "PMID"
     if kinds == {"doi"}:
         return "DOI"
+    if kinds == {"url"}:
+        return "URL"
     return "identifier"
 
 

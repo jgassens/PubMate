@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from lxml import etree
@@ -300,8 +301,8 @@ def test_replaces_pmids_beside_existing_endnote_field(tmp_path: Path) -> None:
     output_paragraph = Document(output_docx).paragraphs[0]
     assert output_paragraph.text == (
         "preparation, illustrating the broader challenge of preserving antigen structure "
-        "during bacterial inactivation.11-13 \u00a0"
-        "{A, 2024, PMID-38319200;B, 2024, PMID-38644097;C, 2017, PMID-27966556}.   "
+        "during bacterial inactivation.11-13."
+        "{A, 2024, PMID-38319200;B, 2024, PMID-38644097;C, 2017, PMID-27966556}   "
         "&#x20;"
     )
     assert len(output_paragraph._p.xpath(".//w:fldChar")) == 3
@@ -340,8 +341,8 @@ def test_replaces_pmids_before_and_after_endnote_hyperlink_field(tmp_path: Path)
 
     output_paragraph = Document(output_docx).paragraphs[0]
     assert output_paragraph.text == (
-        "Before {First, 2024, PMID-12345678} 1 after "
-        "{Second, 2025, PMID-23456789}."
+        "Before {First, 2024, PMID-12345678} 1 after."
+        "{Second, 2025, PMID-23456789}"
     )
     assert _endnote_field_xml(output_paragraph) == original_field_xml
     assert result.warnings == []
@@ -624,7 +625,7 @@ def test_plain_paragraph_after_closed_multi_paragraph_field_is_replaced(
     assert output_document.paragraphs[0].text == ""
     assert output_document.paragraphs[1].text == "field result"
     assert output_document.paragraphs[2].text == (
-        "After {Safe, 2024, PMID-12345678}."
+        "After.{Safe, 2024, PMID-12345678}"
     )
     assert result.warnings == []
 
@@ -1436,7 +1437,7 @@ def test_identifier_inside_existing_word_field_remains_untouched(tmp_path: Path)
     )
 
     assert Document(output_docx).paragraphs[0].text == (
-        "Before PMID 38319200 after {Safe, 2024, PMID-38644097}."
+        "Before PMID 38319200 after.{Safe, 2024, PMID-38644097}"
     )
 
 
@@ -1731,7 +1732,7 @@ def test_reference_section_identifiers_are_skipped_by_default(tmp_path: Path) ->
     )
 
     output_document = Document(output_docx)
-    assert output_document.paragraphs[0].text == "Before {Smith, 2024, PMID-12345678}."
+    assert output_document.paragraphs[0].text == "Before.{Smith, 2024, PMID-12345678}"
     assert output_document.paragraphs[2].text == (
         "1. Example article. PMID: 99999999. DOI: 10.1021/acs.chemrev.3c00409."
     )
@@ -1870,7 +1871,7 @@ def test_parenthetical_unresolved_pmid_stays_outside_braces(tmp_path: Path) -> N
     )
 
 
-def test_parenthetical_mode_preserves_surrounding_punctuation(tmp_path: Path) -> None:
+def test_parenthetical_mode_groups_citations_after_punctuation(tmp_path: Path) -> None:
     input_docx = tmp_path / "input.docx"
     output_docx = tmp_path / "output.docx"
     _save_docx(input_docx, ["activity. (6426050), (104929), (9036716)."])
@@ -1888,7 +1889,7 @@ def test_parenthetical_mode_preserves_surrounding_punctuation(tmp_path: Path) ->
 
     assert (
         _read_paragraph_text(output_docx)
-        == "activity. {A, 1983, PMID-6426050}, {B, 1978, PMID-104929}, {C, 1997, PMID-9036716}."
+        == "activity.{A, 1983, PMID-6426050;B, 1978, PMID-104929;C, 1997, PMID-9036716}"
     )
 
 
@@ -2408,11 +2409,12 @@ def test_comment_wrapper_cannot_insert_into_real_endnote_field(
     assert scan.skipped_identifiers[0]["reason"] == "unsafe_comment_anchor"
 
 
-def _add_external_hyperlink(paragraph, visible_text: str) -> None:
+def _add_external_hyperlink(paragraph, visible_text: str, target: str | None = None):
     """A link to a web page, as an author would write by hand."""
 
     hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("r:id"), "rId99")
+    relationship = paragraph.part.relate_to(target, RELATIONSHIP_TYPE.HYPERLINK, is_external=True) if target else "rId99"
+    hyperlink.set(qn("r:id"), relationship)
     run = OxmlElement("w:r")
     text = OxmlElement("w:t")
     text.set(qn("xml:space"), "preserve")
@@ -2420,6 +2422,7 @@ def _add_external_hyperlink(paragraph, visible_text: str) -> None:
     run.append(text)
     hyperlink.append(run)
     paragraph._p.append(hyperlink)
+    return hyperlink
 
 
 def test_external_hyperlink_text_is_never_converted(tmp_path: Path) -> None:
@@ -2436,6 +2439,128 @@ def test_external_hyperlink_text_is_never_converted(tmp_path: Path) -> None:
 
     assert result.unique_pmids == []
     assert any("field or hidden text" in warning for warning in result.warnings)
+
+
+def test_citation_links_and_hyperlink_fields_convert_without_touching_normal_links(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before (with prose) (([")
+    hyperlink = _add_external_hyperlink(
+        paragraph, "10.1234/example/full", "https://publisher.example/articles/10.1234/example/full"
+    )
+    proof_marker = OxmlElement("w:proofErr")
+    proof_marker.set(qn("w:type"), "spellStart")
+    hyperlink.insert(0, proof_marker)
+    paragraph.add_run("]); ")
+    _add_word_field(paragraph, ' HYPERLINK "https://pubmed.ncbi.nlm.nih.gov/12345678/" \\h ',
+                    "pubmed.ncbi.nlm.nih.gov/12345678/")
+    paragraph.add_run("; see ")
+    _add_external_hyperlink(paragraph, "the article", "https://doi.org/10.1234/example")
+    paragraph.add_run(" or ")
+    _add_external_hyperlink(paragraph, "https://example.com/unresolved", "https://example.com/unresolved")
+    _add_endnote_hyperlink_field(paragraph, "{Protected, 2024, #1}")
+    document.add_paragraph("References")
+    _add_external_hyperlink(document.add_paragraph(), "10.1234/skipped", "https://doi.org/10.1234/skipped")
+    document.save(input_docx)
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_identifiers == [
+        ("doi", "10.1234/example"), ("pmid", "12345678"), ("url", "https://example.com/unresolved")
+    ]
+    assert scan.skipped_identifiers[0]["reason"] == "reference_section"
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_identifier={
+            ("doi", "10.1234/example"): ReferenceRecord("DOI-KEY", "First", "2023"),
+            ("pmid", "12345678"): ReferenceRecord("PMID-12345678", "Second", "2024"),
+        },
+        options=ReplacementOptions(mark_unresolved=True),
+    )
+    output = Document(output_docx).paragraphs[0]
+    assert output.text == (
+        "Before (with prose);{First, 2023, DOI-KEY;Second, 2024, PMID-12345678} "
+        "see the article or https://example.com/unresolved{Protected, 2024, #1}"
+    )
+    assert [link.text for link in output.hyperlinks] == [
+        "the article", "https://example.com/unresolved", "{Protected, 2024, #1}"
+    ]
+    assert [el.text.strip() for el in output._p.xpath(".//w:instrText")] == ["ADDIN EN.CITE existing-citation"]
+    assert len(result.replacements) == 2
+
+
+@pytest.mark.parametrize("marker_kind", ["bookmark", "comment"])
+def test_citation_field_with_range_markers_keeps_its_result_and_range(tmp_path: Path, marker_kind: str) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("See ")
+    target = "https://pubmed.ncbi.nlm.nih.gov/12345678/"
+    _add_word_field(paragraph, f'HYPERLINK "{target}"', target)
+    result_run = paragraph.runs[-2]
+    if marker_kind == "comment":
+        document.add_comment(result_run, text="Annotation on the link", author="Reviewer")
+    else:
+        start = OxmlElement("w:bookmarkStart")
+        start.set(qn("w:id"), "1")
+        start.set(qn("w:name"), "Paper")
+        end = OxmlElement("w:bookmarkEnd")
+        end.set(qn("w:id"), "1")
+        result_run._r.addprevious(start)
+        result_run._r.addnext(end)
+    document.save(input_docx)
+    original_xml = Document(input_docx).paragraphs[0]._p.xml
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_identifiers == []
+    assert scan.skipped_identifiers[0]["reason"] == "locked_citation"
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Author", "2024")},
+    )
+    assert result.replacements == []
+    assert Document(output_docx).paragraphs[0]._p.xml == original_xml
+
+
+@pytest.mark.parametrize("mark_unresolved", [False, True])
+@pytest.mark.parametrize("missing", [
+    "https://pubmed.ncbi.nlm.nih.gov/23456789/",
+    "https://publisher.example/doi/10.1234/missing",
+    "https://doi.org/10.1234/missing",
+    "DOI: https://doi.org/10.1234/missing",
+])
+def test_unresolved_url_text_is_preserved_with_resolved_neighbors(tmp_path: Path, mark_unresolved: bool, missing: str) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    resolved = "https://pubmed.ncbi.nlm.nih.gov/12345678/"
+    _save_docx(input_docx, [f"Missing {missing}.", f"See ({resolved}; {missing})."])
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Author", "2024")},
+        options=ReplacementOptions(mark_unresolved=mark_unresolved),
+    )
+    assert _read_paragraph_text(output_docx) == f"Missing {missing}."
+    assert missing in _read_paragraph_text(output_docx, 1)
+    assert "{Author, 2024, PMID-12345678}" in _read_paragraph_text(output_docx, 1)
+    assert len(result.replacements) == 1
+
+
+def test_doi_url_decodes_once_in_plain_text_and_word_link_forms(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    target = "https://doi.org/10.1234/example%252Fpart"
+    document = Document()
+    document.add_paragraph(target)
+    _add_external_hyperlink(document.add_paragraph(), target, target)
+    _add_word_field(document.add_paragraph(), f'HYPERLINK "{target}"', target)
+    document.save(input_docx)
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_identifiers == [("doi", "10.1234/example%2fpart")]
+    assert len(scan.occurrences) == 3
 
 
 def test_bare_identifier_in_wrapper_is_not_converted(tmp_path: Path) -> None:

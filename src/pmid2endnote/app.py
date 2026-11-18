@@ -16,6 +16,7 @@ from pmid2endnote.pubmed import PubMedClient
 from pmid2endnote.references import ReferenceResolver
 from pmid2endnote.report import create_report, write_report
 from pmid2endnote.settings import resolve_email, save_email
+from pmid2endnote.web_references import UNSUPPORTED_URL_WARNING, supports_reference_url
 from pmid2endnote.word import (
     ReplacementOptions,
     ScanResult,
@@ -140,7 +141,7 @@ def process_document(
     )
 
     try:
-        status("Scanning Word document for PMID/DOI blocks...")
+        status("Scanning Word document for citation identifiers and links...")
         scan_result = scan_docx(input_docx, replacement_options)
     except InputDocumentError as exc:
         report["errors"].append(str(exc))
@@ -162,14 +163,29 @@ def process_document(
     )
     source_map = _source_map(scan_result)
 
-    if not scan_result.unique_identifiers:
-        _write_report_if_enabled(report, report_file, options.write_report)
-        messages.append(
-            _nothing_converted_message(
-                scan_result.skipped_identifiers,
-                convert_locked_citations=options.convert_locked_citations,
+    if not any(
+        kind != "url" or supports_reference_url(value)
+        for kind, value in scan_result.unique_identifiers
+    ):
+        if scan_result.unique_identifiers:
+            report["identifier_statuses"] = build_identifier_statuses(
+                scan_result=scan_result,
+                resolutions={
+                    (kind, value): IdentifierResolution(kind, value, None, warnings=(UNSUPPORTED_URL_WARNING,))
+                    for kind, value in scan_result.unique_identifiers
+                },
+                included_keys=set(),
+                replacements=[],
             )
-        )
+            messages.append("Found only unsupported citation URLs. No Word or EndNote files were written.")
+        else:
+            messages.append(
+                _nothing_converted_message(
+                    scan_result.skipped_identifiers,
+                    convert_locked_citations=options.convert_locked_citations,
+                )
+            )
+        _write_report_if_enabled(report, report_file, options.write_report)
         if options.write_report:
             messages.append(f"Wrote report: {report_file}")
         return ProcessingResult(0, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
@@ -217,7 +233,7 @@ def process_document(
         ]
         if unresolved_identifiers:
             report["warnings"].append(
-                "Unresolved identifiers were left unchanged unless marked by --mark-unresolved: "
+                "Could not resolve the following references: "
                 + ", ".join(unresolved_identifiers)
             )
 
@@ -428,6 +444,11 @@ def process_document(
             messages.append(f"Wrote report: {report_file}")
         messages.append(ENDNOTE_INSTRUCTIONS.format(enw_file=enw_file, output_docx=output_docx))
 
+    if unresolved_identifiers:
+        count = len(unresolved_identifiers)
+        noun = "reference" if count == 1 else "references"
+        messages.append(f"Could not resolve {count} {noun}. Review these sources in the manuscript.")
+
     return ProcessingResult(0, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
 
 
@@ -617,7 +638,7 @@ def _nothing_converted_message(
     """
 
     if not skipped_identifiers:
-        return "No matching PMID or DOI blocks were found. No Word or EndNote files were written."
+        return "No matching PMID, DOI, or citation link was found. No Word or EndNote files were written."
 
     counts: dict[str, int] = {}
     for entry in skipped_identifiers:
@@ -629,8 +650,9 @@ def _nothing_converted_message(
         f"{count} {_SKIP_REASON_TEXT.get(reason, reason)}"
         for reason, count in sorted(counts.items(), key=lambda item: -item[1])
     ]
+    label = "reference" if any(entry.get("kind") == "url" for entry in skipped_identifiers) else "PMID/DOI identifier"
     message = (
-        f"Found {total} PMID/DOI identifier{'' if total == 1 else 's'} but converted none: "
+        f"Found {total} {label}{'' if total == 1 else 's'} but converted none: "
         + "; ".join(parts)
         + ". No Word or EndNote files were written."
     )

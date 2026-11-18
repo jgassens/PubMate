@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
@@ -17,6 +18,7 @@ def _save_docx(path: Path, text: str) -> None:
 
 
 class FakePubMedClient:
+    tool = "pmid2endnote"
     records = {
         "6426050": PubMedRecord("6426050", "Petersen", "1983"),
         "38408451": PubMedRecord(
@@ -56,6 +58,152 @@ class FakePubMedClient:
         if self.nbib_text is not None:
             return self.nbib_text
         return "\n\n".join(f"PMID- {pmid}\nTI  - Example" for pmid in pmids)
+
+
+def test_url_only_references_import_with_types_and_report_unsupported_links(tmp_path: Path, monkeypatch) -> None:
+    class Client(FakePubMedClient):
+        def fetch_book_summary(self, accession):
+            assert accession == "NBK123"
+            return {
+                "rid": accession,
+                "rtype": "chapter",
+                "title": "Example chapter",
+                "pubdate": "2025/01/01",
+                "bookinfo": (
+                    "<Info><Citation><MainRecord><Contributors>Chen J, Park L</Contributors>"
+                    "</MainRecord><ParentRecord><Title>Example book</Title></ParentRecord></Citation></Info>"
+                ),
+            }
+
+    class Response:
+        status_code = 200
+        content = b'<meta property="og:title" content="Example Guidelines - Uroweb">'
+
+    def fetch_page(session, url, **kwargs):
+        assert url == "https://uroweb.org/guidelines/example"
+        assert kwargs["allow_redirects"] is False
+        return Response()
+
+    monkeypatch.setattr(app, "PubMedClient", Client)
+    monkeypatch.setattr("pmid2endnote.references.requests.Session.get", fetch_page)
+    docx = tmp_path / "input.docx"
+    _save_docx(docx, "See (https://www.ncbi.nlm.nih.gov/books/NBK123/), (https://uroweb.org/guidelines/example), "
+                     "and (https://example.com/unresolved).")
+    result = process_document(ProcessingOptions(input_docx=docx, email="test@example.edu", save_email=False))
+    assert result.exit_code == 0
+    assert len(result.report["replacements"]) == 2
+    enw = result.enw_file.read_text()
+    assert "%0 Book Section\n%A Chen, J\n%A Park, L\n%D 2025\n%T Example chapter\n%B Example book" in enw
+    assert "%0 Web Page\n%A European Association of Urology,\n%T Example Guidelines" in enw
+    output_text = Document(result.output_docx).paragraphs[0].text
+    assert output_text.startswith("See,{Chen, 2025, URL-")
+    assert ";European Association of Urology, , URL-" in output_text
+    assert "https://example.com/unresolved" in output_text
+    statuses = result.report["identifier_statuses"]
+    assert [entry["resolved"] for entry in statuses] == [True, True, False]
+    assert any("Could not resolve 1 reference" in message for message in result.messages)
+
+
+def test_unsupported_urls_only_write_a_report_without_requiring_email(tmp_path: Path, monkeypatch) -> None:
+    def unexpected_email_check(*args):
+        pytest.fail("There is no supported reference to look up")
+
+    monkeypatch.setattr(app, "resolve_email", unexpected_email_check)
+    docx = tmp_path / "input.docx"
+    url = "https://example.org/article?id=10.1234/other"
+    document = Document()
+    document.add_paragraph(f"See ({url}).")
+    paragraph = document.add_paragraph()
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), paragraph.part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True))
+    hyperlink.append(paragraph.add_run(url)._r)
+    paragraph._p.append(hyperlink)
+    document.save(docx)
+
+    result = process_document(ProcessingOptions(input_docx=docx, scan_bare_dois=True))
+
+    assert result.exit_code == 0
+    assert result.report["errors"] == []
+    assert result.report_file.exists()
+    assert not result.output_docx.exists() and not result.enw_file.exists()
+    statuses = result.report["identifier_statuses"]
+    assert [status["source"] for status in statuses] == ["citation_url", "citation_link"]
+    assert all(status["normalized"] == url and not status["resolved"] for status in statuses)
+    assert all("No metadata provider for this URL." in status["warnings"] for status in statuses)
+    assert any("only unsupported citation URLs" in message for message in result.messages)
+
+
+@pytest.mark.parametrize("scan_dois", [False, True])
+@pytest.mark.parametrize("query_value", ["10.1186/s12951-023-01782-w", "https://doi.org/10.1186/s12951-023-01782-w"])
+def test_pubmed_url_query_cannot_select_a_different_record(tmp_path: Path, monkeypatch, scan_dois, query_value) -> None:
+    monkeypatch.setattr(app, "PubMedClient", FakePubMedClient)
+    docx = tmp_path / "input.docx"
+    _save_docx(docx, f"See (https://pubmed.ncbi.nlm.nih.gov/6426050/?id={query_value}).")
+
+    result = process_document(ProcessingOptions(
+        input_docx=docx, email="test@example.edu", save_email=False,
+        scan_dois=scan_dois, scan_bare_dois=True,
+    ))
+
+    assert result.exit_code == 0
+    status, = result.report["identifier_statuses"]
+    assert status["citation_key"] == "PMID-6426050"
+    assert Document(result.output_docx).paragraphs[0].text == "See.{Petersen, 1983, PMID-6426050}"
+
+
+def test_doi_lookup_preserves_literal_percent_encoding_in_record_identity(tmp_path: Path, monkeypatch) -> None:
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"message": {"DOI": "10.1234/example%2Fpart", "title": ["Paper with encoded DOI"]}}
+
+    def fetch_doi(session, url, **kwargs):
+        assert url == "https://api.crossref.org/works/10.1234/example%252fpart"
+        return Response()
+
+    monkeypatch.setattr(app, "PubMedClient", FakePubMedClient)
+    monkeypatch.setattr("pmid2endnote.references.requests.Session.get", fetch_doi)
+    docx = tmp_path / "input.docx"
+    _save_docx(docx, "See (https://doi.org/10.1234/example%252Fpart).")
+
+    result = process_document(ProcessingOptions(
+        input_docx=docx, email="test@example.edu", save_email=False, doi_source="crossref"
+    ))
+
+    assert result.exit_code == 0
+    assert "%R 10.1234/example%2fpart\n" in result.enw_file.read_text()
+    assert "%U https://doi.org/10.1234/example%252fpart\n" in result.enw_file.read_text()
+
+
+@pytest.mark.parametrize("payload", [[], {"records": None}, {"records": [None]}, {"records": [{"pmcid": "PMC123", "doi": []}]}])
+def test_malformed_pmc_payload_preserves_url_and_other_references(tmp_path: Path, monkeypatch, payload) -> None:
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return payload
+
+    def fetch_pmc(session, url, **kwargs):
+        assert kwargs["params"]["ids"] == "PMC123"
+        return Response()
+
+    monkeypatch.setattr(app, "PubMedClient", FakePubMedClient)
+    monkeypatch.setattr("pmid2endnote.references.requests.Session.get", fetch_pmc)
+    docx = tmp_path / "input.docx"
+    url = "https://pmc.ncbi.nlm.nih.gov/articles/PMC123/"
+    _save_docx(docx, f"See ({url}). Also see PMID: 6426050.")
+
+    result = process_document(ProcessingOptions(input_docx=docx, email="test@example.edu", save_email=False))
+
+    assert result.exit_code == 0
+    url_status, pmid_status = result.report["identifier_statuses"]
+    assert not url_status["resolved"] and "URL metadata lookup failed." in url_status["warnings"]
+    assert pmid_status["resolved"] and pmid_status["replacement_count"] == 1
+    assert Document(result.output_docx).paragraphs[0].text == f"See ({url}). Also see.{{Petersen, 1983, PMID-6426050}}"
 
 
 def test_non_dry_run_writes_valid_enw_before_docx_and_reports_status(
@@ -371,7 +519,7 @@ def test_nothing_converted_message_reports_what_was_found(tmp_path: Path) -> Non
     assert "Found 1 PMID/DOI identifier but converted none" in message
     assert "inside a Word field, hyperlink, or hidden text" in message
     assert "--no-convert-locked-citations" in message
-    assert "No matching PMID or DOI blocks were found" not in message
+    assert "No matching PMID, DOI, or citation link was found" not in message
 
 
 def test_document_with_no_identifiers_still_says_none_were_found(tmp_path: Path) -> None:
@@ -389,7 +537,7 @@ def test_document_with_no_identifiers_still_says_none_were_found(tmp_path: Path)
     )
 
     assert any(
-        "No matching PMID or DOI blocks were found" in message
+        "No matching PMID, DOI, or citation link was found" in message
         for message in result.messages
     )
 
@@ -494,7 +642,7 @@ def test_rejected_identifiers_are_reported_in_every_scanned_story(
     assert {entry["location"]["part"] for entry in skipped} == {story}
     message = " ".join(result.messages)
     assert f"Found {count} PMID/DOI identifier{'s' if count > 1 else ''} but converted none" in message
-    assert "No matching PMID or DOI blocks were found" not in message
+    assert "No matching PMID, DOI, or citation link was found" not in message
     assert not result.output_docx.exists()
     assert not result.enw_file.exists()
 

@@ -13,7 +13,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pmid2endnote",
         description=(
-            "Scan a Word .docx for PubMed PMIDs and DOI identifiers, create an "
+            "Scan a Word .docx for PubMed PMIDs, DOIs, and reference links, create an "
             "EndNote Tagged Import file, and replace identifier text with EndNote "
             "temporary citations."
         ),
@@ -85,13 +85,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="scan_dois",
         action="store_true",
         default=True,
-        help="Scan DOI labels and doi.org URLs. Enabled by default.",
+        help="Scan DOI labels, doi.org URLs, and DOI citation links. Enabled by default.",
     )
     parser.add_argument(
         "--no-scan-dois",
         dest="scan_dois",
         action="store_false",
-        help="Disable DOI label and doi.org URL scanning.",
+        help="Disable DOI detection.",
     )
     parser.add_argument(
         "--scan-bare-dois",

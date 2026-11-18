@@ -15,6 +15,7 @@ from pmid2endnote.errors import PubMedFetchError, PubMedParseError
 
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 
 
@@ -136,6 +137,32 @@ class PubMedClient:
             if text.strip():
                 texts.append(text.rstrip() + "\n")
         return "\n".join(texts)
+
+    def fetch_book_summary(self, accession: str) -> dict:
+        """Fetch Bookshelf metadata for an exact Bookshelf resource ID."""
+
+        search = self._get_book_data(ESEARCH_URL, {"term": f"{accession}[rid]"})
+        ids = search.get("esearchresult", {}).get("idlist", [])
+        if len(ids) != 1 or not str(ids[0]).isdigit():
+            return {}
+        uid = str(ids[0])
+        summary = self._get_book_data(ESUMMARY_URL, {"id": uid})
+        return summary.get("result", {}).get(uid, {})
+
+    def _get_book_data(self, url: str, lookup: dict[str, str]) -> dict:
+        params = {"db": "books", "retmode": "json", "tool": self.tool, "email": self.email, **lookup}
+        if self.api_key:
+            params["api_key"] = self.api_key
+        self._respect_rate_limit()
+        try:
+            response = self.session.get(url, params=params, timeout=self.timeout_seconds, allow_redirects=False)
+            if response.status_code != 200:
+                raise PubMedFetchError(f"NCBI Bookshelf request returned HTTP {response.status_code}.")
+            return response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise PubMedFetchError("NCBI Bookshelf metadata lookup failed.") from exc
+        finally:
+            self._last_request_at = time.monotonic()
 
     def _post_efetch(self, pmids: list[str], *, extra_params: dict[str, str]) -> str:
         data = {
