@@ -2445,7 +2445,7 @@ def test_citation_links_and_hyperlink_fields_convert_without_touching_normal_lin
     input_docx = tmp_path / "input.docx"
     output_docx = tmp_path / "output.docx"
     document = Document()
-    paragraph = document.add_paragraph("Before (with prose) ([")
+    paragraph = document.add_paragraph("Before (with prose) (([")
     hyperlink = _add_external_hyperlink(
         paragraph, "10.1234/example/full", "https://publisher.example/articles/10.1234/example/full"
     )

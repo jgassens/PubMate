@@ -1572,8 +1572,11 @@ def _place_citations_after_punctuation(
     for citation in citations:
         masked[citation.start:citation.end] = "x" * (citation.end - citation.start)
 
+    wrappers = list(_identifier_only_wrappers("".join(masked)))
+    paired_openings = {start for start, _ in wrappers}
+    paired_closings = {end - 1 for _, end in wrappers}
     groups = list(citations)
-    for start, end in _identifier_only_wrappers("".join(masked)):
+    for start, end in wrappers:
         inside = tuple(cite for cite in groups if start < cite.start and cite.end < end)
         if inside and _wrapper_contains_only_identifiers(text, start, end, inside):
             groups = [cite for cite in groups if cite not in inside]
@@ -1583,6 +1586,15 @@ def _place_citations_after_punctuation(
     # Adjacent citation-only groups share a single spot after punctuation.
     clusters: list[PlacedCitation] = []
     for group in sorted(groups, key=lambda cite: cite.start):
+        start, end = group.start, group.end
+        if start in paired_openings and end - 1 in paired_closings:
+            # A duplicated delimiter next to a complete citation wrapper is
+            # part of that wrapper when it has no matching delimiter of its own.
+            while start > 0 and text[start - 1] == text[group.start] and start - 1 not in paired_openings:
+                start -= 1
+            while end < len(text) and text[end] == text[group.end - 1] and end not in paired_closings:
+                end += 1
+            group = PlacedCitation(start, end, group.reports)
         if clusters and re.fullmatch(r"[ \t\u00a0]*[,;]?[ \t\u00a0]*", text[clusters[-1].end:group.start]):
             previous = clusters.pop()
             group = PlacedCitation(previous.start, group.end, previous.reports + group.reports)
