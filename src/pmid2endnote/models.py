@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-IdentifierKind = Literal["pmid", "doi"]
+IdentifierKind = Literal["pmid", "doi", "url"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,9 @@ class ReferenceRecord:
     metadata_source: str = "none"
     source_identifiers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    reference_type: str = "Journal Article"
+    book_title: str | None = None
+    publisher: str | None = None
 
 
 @dataclass(frozen=True)

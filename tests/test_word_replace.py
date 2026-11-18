@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from lxml import etree
@@ -2408,11 +2409,12 @@ def test_comment_wrapper_cannot_insert_into_real_endnote_field(
     assert scan.skipped_identifiers[0]["reason"] == "unsafe_comment_anchor"
 
 
-def _add_external_hyperlink(paragraph, visible_text: str) -> None:
+def _add_external_hyperlink(paragraph, visible_text: str, target: str | None = None):
     """A link to a web page, as an author would write by hand."""
 
     hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("r:id"), "rId99")
+    relationship = paragraph.part.relate_to(target, RELATIONSHIP_TYPE.HYPERLINK, is_external=True) if target else "rId99"
+    hyperlink.set(qn("r:id"), relationship)
     run = OxmlElement("w:r")
     text = OxmlElement("w:t")
     text.set(qn("xml:space"), "preserve")
@@ -2420,6 +2422,7 @@ def _add_external_hyperlink(paragraph, visible_text: str) -> None:
     run.append(text)
     hyperlink.append(run)
     paragraph._p.append(hyperlink)
+    return hyperlink
 
 
 def test_external_hyperlink_text_is_never_converted(tmp_path: Path) -> None:
@@ -2436,6 +2439,55 @@ def test_external_hyperlink_text_is_never_converted(tmp_path: Path) -> None:
 
     assert result.unique_pmids == []
     assert any("field or hidden text" in warning for warning in result.warnings)
+
+
+def test_citation_links_and_hyperlink_fields_convert_without_touching_normal_links(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before (")
+    hyperlink = _add_external_hyperlink(
+        paragraph, "10.1234/example/full", "https://publisher.example/articles/10.1234/example/full"
+    )
+    proof_marker = OxmlElement("w:proofErr")
+    proof_marker.set(qn("w:type"), "spellStart")
+    hyperlink.insert(0, proof_marker)
+    paragraph.add_run("); ")
+    _add_word_field(paragraph, ' HYPERLINK "https://pubmed.ncbi.nlm.nih.gov/12345678/" \\h ',
+                    "pubmed.ncbi.nlm.nih.gov/12345678/")
+    paragraph.add_run("; see ")
+    _add_external_hyperlink(paragraph, "the article", "https://doi.org/10.1234/example")
+    paragraph.add_run(" or ")
+    _add_external_hyperlink(paragraph, "https://example.com/unresolved", "https://example.com/unresolved")
+    _add_endnote_hyperlink_field(paragraph, "{Protected, 2024, #1}")
+    document.add_paragraph("References")
+    _add_external_hyperlink(document.add_paragraph(), "10.1234/skipped", "https://doi.org/10.1234/skipped")
+    document.save(input_docx)
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_identifiers == [
+        ("doi", "10.1234/example"), ("pmid", "12345678"), ("url", "https://example.com/unresolved")
+    ]
+    assert scan.skipped_identifiers[0]["reason"] == "reference_section"
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_identifier={
+            ("doi", "10.1234/example"): ReferenceRecord("DOI-KEY", "First", "2023"),
+            ("pmid", "12345678"): ReferenceRecord("PMID-12345678", "Second", "2024"),
+        },
+        options=ReplacementOptions(mark_unresolved=True),
+    )
+    output = Document(output_docx).paragraphs[0]
+    assert output.text == (
+        "Before ({First, 2023, DOI-KEY}); {Second, 2024, PMID-12345678}; "
+        "see the article or https://example.com/unresolved{Protected, 2024, #1}"
+    )
+    assert [link.text for link in output.hyperlinks] == [
+        "the article", "https://example.com/unresolved", "{Protected, 2024, #1}"
+    ]
+    assert [el.text.strip() for el in output._p.xpath(".//w:instrText")] == ["ADDIN EN.CITE existing-citation"]
+    assert len(result.replacements) == 2
 
 
 def test_bare_identifier_in_wrapper_is_not_converted(tmp_path: Path) -> None:

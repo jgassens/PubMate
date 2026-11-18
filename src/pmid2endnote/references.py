@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import hashlib
 from typing import Iterable
+from xml.etree.ElementTree import ParseError
+
+from lxml.etree import ParserError
 
 import requests
 
+from pmid2endnote.errors import PubMedFetchError, PubMedParseError
 from pmid2endnote.models import IdentifierKind, IdentifierResolution, ReferenceRecord
 from pmid2endnote.pubmed import PubMedClient, PubMedRecord
 from pmid2endnote.scanner import normalize_doi
+from pmid2endnote.web_references import BOOK_URL_RE, EAU_URL_RE, PMC_URL_RE, books_reference, eau_reference
 
 
 def pmid_citation_key(pmid: str) -> str:
@@ -75,15 +80,25 @@ class ReferenceResolver:
         for kind, value in identifiers:
             if kind == "doi":
                 self.resolutions[(kind, value)] = self._resolve_doi(value)
+        for kind, value in identifiers:
+            if kind == "url":
+                self.resolutions[(kind, value)] = self._resolve_url(value)
 
         return self.resolutions
 
     def _resolve_doi(self, doi: str) -> IdentifierResolution:
         warnings: list[str] = []
         if self.doi_source in {"auto", "pubmed-first"}:
-            candidate_pmids = self.pubmed_client.search_pmids_by_doi(doi)
+            existing = next((record for record in self.references_by_key.values() if record.doi == doi), None)
+            if existing is not None:
+                return IdentifierResolution("doi", doi, existing, existing.metadata_source)
+            try:
+                candidate_pmids = self.pubmed_client.search_pmids_by_doi(doi)
+                records = self.pubmed_client.fetch_records(candidate_pmids) if candidate_pmids else {}
+            except (PubMedFetchError, PubMedParseError):
+                candidate_pmids = []
+                warnings.append("PubMed DOI lookup failed. Tried DOI metadata services.")
             if candidate_pmids:
-                records = self.pubmed_client.fetch_records(candidate_pmids)
                 for pmid in candidate_pmids:
                     record = records.get(pmid)
                     if record and _pubmed_record_has_doi(record, doi):
@@ -101,6 +116,54 @@ class ReferenceResolver:
             return IdentifierResolution("doi", doi, None, "none", tuple(warnings))
         reference = self._store_reference(reference)
         return IdentifierResolution("doi", doi, reference, reference.metadata_source, tuple(warnings))
+
+    def _resolve_url(self, url: str) -> IdentifierResolution:
+        book = BOOK_URL_RE.fullmatch(url)
+        pmc = PMC_URL_RE.fullmatch(url)
+        reference = None
+        try:
+            if book:
+                reference = books_reference(url, self.pubmed_client.fetch_book_summary(book[1]))
+            elif pmc:
+                reference = self._reference_from_pmc_id(pmc[1])
+            elif EAU_URL_RE.fullmatch(url):
+                response = self.session.get(url, timeout=self.timeout_seconds, allow_redirects=False)
+                if response.status_code == 200:
+                    reference = eau_reference(url, response.content)
+            else:
+                return IdentifierResolution("url", url, None, warnings=("No metadata provider for this URL.",))
+        except (requests.RequestException, PubMedFetchError, PubMedParseError, ParseError, ParserError, ValueError):
+            return IdentifierResolution("url", url, None, warnings=("URL metadata lookup failed.",))
+        if reference is None:
+            return IdentifierResolution("url", url, None, warnings=("No matching metadata was found for this URL.",))
+        reference = self._store_reference(reference)
+        return IdentifierResolution("url", url, reference, reference.metadata_source)
+
+    def _reference_from_pmc_id(self, pmcid: str) -> ReferenceRecord | None:
+        response = self.session.get(
+            "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/",
+            params={"ids": pmcid, "format": "json", "tool": self.pubmed_client.tool, "email": self.pubmed_client.email},
+            timeout=self.timeout_seconds,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return None
+        for record in response.json().get("records", []):
+            if record.get("pmcid") != pmcid:
+                continue
+            pmid = str(record.get("pmid", ""))
+            if pmid.isdigit():
+                existing = self.references_by_key.get(pmid_citation_key(pmid))
+                if existing is not None:
+                    return existing
+                pubmed_record = self.pubmed_client.fetch_records([pmid]).get(pmid)
+                if pubmed_record:
+                    return reference_from_pubmed(pubmed_record, source_identifiers=(f"PMCID:{pmcid}",))
+            if record.get("doi"):
+                doi = normalize_doi(record["doi"])
+                resolution = self.resolutions.get(("doi", doi)) or self._resolve_doi(doi)
+                return resolution.reference
+        return None
 
     def _resolve_doi_metadata(self, doi: str) -> tuple[ReferenceRecord | None, list[str]]:
         warnings: list[str] = []

@@ -140,7 +140,7 @@ def process_document(
     )
 
     try:
-        status("Scanning Word document for PMID/DOI blocks...")
+        status("Scanning Word document for citation identifiers and links...")
         scan_result = scan_docx(input_docx, replacement_options)
     except InputDocumentError as exc:
         report["errors"].append(str(exc))
@@ -217,7 +217,7 @@ def process_document(
         ]
         if unresolved_identifiers:
             report["warnings"].append(
-                "Unresolved identifiers were left unchanged unless marked by --mark-unresolved: "
+                "Could not resolve the following references: "
                 + ", ".join(unresolved_identifiers)
             )
 
@@ -428,6 +428,11 @@ def process_document(
             messages.append(f"Wrote report: {report_file}")
         messages.append(ENDNOTE_INSTRUCTIONS.format(enw_file=enw_file, output_docx=output_docx))
 
+    if unresolved_identifiers:
+        count = len(unresolved_identifiers)
+        noun = "reference" if count == 1 else "references"
+        messages.append(f"Could not resolve {count} {noun}. Review these sources in the manuscript.")
+
     return ProcessingResult(0, report, output_docx, nbib_file, enw_file, report_file, tuple(messages))
 
 
@@ -617,7 +622,7 @@ def _nothing_converted_message(
     """
 
     if not skipped_identifiers:
-        return "No matching PMID or DOI blocks were found. No Word or EndNote files were written."
+        return "No matching PMID, DOI, or citation link was found. No Word or EndNote files were written."
 
     counts: dict[str, int] = {}
     for entry in skipped_identifiers:
@@ -629,8 +634,9 @@ def _nothing_converted_message(
         f"{count} {_SKIP_REASON_TEXT.get(reason, reason)}"
         for reason, count in sorted(counts.items(), key=lambda item: -item[1])
     ]
+    label = "reference" if any(entry.get("kind") == "url" for entry in skipped_identifiers) else "PMID/DOI identifier"
     message = (
-        f"Found {total} PMID/DOI identifier{'' if total == 1 else 's'} but converted none: "
+        f"Found {total} {label}{'' if total == 1 else 's'} but converted none: "
         + "; ".join(parts)
         + ". No Word or EndNote files were written."
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from typing import Iterable, Literal
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 from pmid2endnote.models import IdentifierKind
 
@@ -80,6 +80,7 @@ DOI_URL_RE = re.compile(
 )
 
 BARE_DOI_RE = re.compile(rf"(?<![A-Za-z0-9/])(?P<doi>{DOI_CORE_RE})", re.IGNORECASE)
+HTTP_URL_RE = re.compile(r"https?://[^\s<>{}\"']+", re.IGNORECASE)
 
 TRAILING_EXTERNAL_PUNCTUATION = ".,"
 
@@ -93,7 +94,9 @@ class IdentifierBlock:
     start: int
     end: int
     kind: IdentifierKind
-    source: Literal["labeled", "parenthetical", "doi_label", "doi_url", "bare_doi"] = "labeled"
+    source: Literal[
+        "labeled", "parenthetical", "doi_label", "doi_url", "bare_doi", "citation_url", "citation_link"
+    ] = "labeled"
 
     @property
     def pmids(self) -> tuple[str, ...]:
@@ -145,6 +148,92 @@ def _external_doi_suffix_length(raw_doi: str, following_text: str = "") -> int:
     ):
         stripped = stripped[:-1]
     return len(raw_doi) - len(stripped)
+
+
+def citation_url(value: str) -> str | None:
+    """Return a usable HTTP(S) citation URL without a document fragment."""
+
+    if not HTTP_URL_RE.fullmatch(value) or "\\" in value:
+        return None
+    try:
+        parts = urlsplit(value)
+        if not parts.hostname or "." not in parts.hostname or parts.username is not None:
+            return None
+        if parts.port is not None or not re.fullmatch(r"[a-z0-9.-]+", parts.hostname):
+            return None
+    except ValueError:
+        return None
+    return urlunsplit((parts.scheme, parts.hostname, parts.path or "/", parts.query, ""))
+
+
+def citation_link_identifier(
+    url: str, label: str = "", *, scan_dois: bool = True
+) -> tuple[IdentifierKind, str] | None:
+    """Recognize reference links whose visible text is a DOI or the URL itself."""
+
+    url = citation_url(url)
+    if url is None:
+        return None
+    parts = urlsplit(url)
+    host = parts.netloc
+    path = unquote(parts.path).removeprefix("/")
+    if host not in {"doi.org", "dx.doi.org"}:
+        path = path.rstrip("/")
+    pmid = re.fullmatch(r"(\d{1,12})", path) if host == "pubmed.ncbi.nlm.nih.gov" else None
+    if host in {"ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov"}:
+        pmid = re.fullmatch(r"pubmed/(\d{1,12})", path)
+
+    target_doi = _doi_from_citation_url(host, path, parts.query)
+    visible_doi = None
+    if label:
+        label = label.strip()
+        visible_url = citation_url(label) or citation_url(f"{parts.scheme}://{label}")
+        same_url = bool(visible_url and urlsplit(visible_url)[1:] == parts[1:])
+        if not same_url:
+            display_doi = normalize_doi(label)
+            if BARE_DOI_RE.fullmatch(display_doi):
+                visible_doi = display_doi
+                if target_doi and visible_doi != target_doi:
+                    if re.sub(r"/(?:full|abstract|pdf)$", "", visible_doi) != target_doi:
+                        return None
+            else:
+                labeled_pmid = PMID_BLOCK_RE.fullmatch(label)
+                if not (pmid and labeled_pmid and labeled_pmid["ids"] == pmid[1]):
+                    return None
+
+    doi = target_doi or visible_doi
+    if doi:
+        return ("doi", doi) if scan_dois else None
+    if pmid:
+        return "pmid", pmid[1]
+    if host in {"ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov"} and re.fullmatch(r"books/NBK\d+", path, re.I):
+        url = f"https://www.ncbi.nlm.nih.gov/books/{path.split('/')[1].upper()}/"
+    elif host == "pmc.ncbi.nlm.nih.gov" and re.fullmatch(r"articles/PMC\d+", path, re.I):
+        url = f"https://pmc.ncbi.nlm.nih.gov/articles/{path.split('/')[1].upper()}/"
+    elif host in {"uroweb.org", "www.uroweb.org"} and re.fullmatch(r"guidelines/[a-z0-9-]+", path):
+        url = f"https://uroweb.org/{path}"
+    return "url", url
+
+
+def _doi_from_citation_url(host: str, path: str, query: str) -> str | None:
+    if host in {"doi.org", "dx.doi.org"}:
+        return normalize_doi(path) if BARE_DOI_RE.fullmatch(path) else None
+
+    match = re.search(
+        rf"(?:^|/)(?P<prefix>doi/(?:full/|abs/|abstract/|pdf/)?|articles?/)(?P<doi>{DOI_CORE_RE})$",
+        path, re.I,
+    )
+    if match:
+        doi = match["doi"]
+        if match["prefix"].lower().startswith("article"):
+            doi = re.sub(r"/(?:full|abstract|pdf)$", "", doi, flags=re.I)
+        return normalize_doi(doi)
+    params = parse_qs(query)
+    for key in ("doi", "id"):
+        values = params.get(key, [])
+        if len(values) == 1 and BARE_DOI_RE.fullmatch(values[0]):
+            return normalize_doi(values[0])
+    return None
 
 
 def scan_text(

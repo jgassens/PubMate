@@ -734,7 +734,7 @@ class PubMateGUI:
     def show_about(self) -> None:
         messagebox.showinfo(
             "About PubMate",
-            f"PubMate {__version__}\n\nConvert Word PMID/DOI placeholders for EndNote.",
+            f"PubMate {__version__}\n\nConvert Word citation identifiers and reference links for EndNote.",
             parent=self.root,
         )
 

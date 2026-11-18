@@ -58,6 +58,49 @@ class FakePubMedClient:
         return "\n\n".join(f"PMID- {pmid}\nTI  - Example" for pmid in pmids)
 
 
+def test_url_only_references_import_with_types_and_report_unsupported_links(tmp_path: Path, monkeypatch) -> None:
+    class Client(FakePubMedClient):
+        def fetch_book_summary(self, accession):
+            assert accession == "NBK123"
+            return {
+                "rid": accession,
+                "rtype": "chapter",
+                "title": "Example chapter",
+                "pubdate": "2025/01/01",
+                "bookinfo": (
+                    "<Info><Citation><MainRecord><Contributors>Chen J, Park L</Contributors>"
+                    "</MainRecord><ParentRecord><Title>Example book</Title></ParentRecord></Citation></Info>"
+                ),
+            }
+
+    class Response:
+        status_code = 200
+        content = b'<meta property="og:title" content="Example Guidelines - Uroweb">'
+
+    def fetch_page(session, url, **kwargs):
+        assert url == "https://uroweb.org/guidelines/example"
+        assert kwargs["allow_redirects"] is False
+        return Response()
+
+    monkeypatch.setattr(app, "PubMedClient", Client)
+    monkeypatch.setattr("pmid2endnote.references.requests.Session.get", fetch_page)
+    docx = tmp_path / "input.docx"
+    _save_docx(docx, "See (https://www.ncbi.nlm.nih.gov/books/NBK123/), (https://uroweb.org/guidelines/example), "
+                     "and (https://example.com/unresolved).")
+    result = process_document(ProcessingOptions(input_docx=docx, email="test@example.edu", save_email=False))
+    assert result.exit_code == 0
+    assert len(result.report["replacements"]) == 2
+    enw = result.enw_file.read_text()
+    assert "%0 Book Section\n%A Chen, J\n%A Park, L\n%D 2025\n%T Example chapter\n%B Example book" in enw
+    assert "%0 Web Page\n%A European Association of Urology,\n%T Example Guidelines" in enw
+    output_text = Document(result.output_docx).paragraphs[0].text
+    assert "{European Association of Urology, , URL-" in output_text
+    assert "https://example.com/unresolved" in output_text
+    statuses = result.report["identifier_statuses"]
+    assert [entry["resolved"] for entry in statuses] == [True, True, False]
+    assert any("Could not resolve 1 reference" in message for message in result.messages)
+
+
 def test_non_dry_run_writes_valid_enw_before_docx_and_reports_status(
     tmp_path: Path,
     monkeypatch,
@@ -371,7 +414,7 @@ def test_nothing_converted_message_reports_what_was_found(tmp_path: Path) -> Non
     assert "Found 1 PMID/DOI identifier but converted none" in message
     assert "inside a Word field, hyperlink, or hidden text" in message
     assert "--no-convert-locked-citations" in message
-    assert "No matching PMID or DOI blocks were found" not in message
+    assert "No matching PMID, DOI, or citation link was found" not in message
 
 
 def test_document_with_no_identifiers_still_says_none_were_found(tmp_path: Path) -> None:
@@ -389,7 +432,7 @@ def test_document_with_no_identifiers_still_says_none_were_found(tmp_path: Path)
     )
 
     assert any(
-        "No matching PMID or DOI blocks were found" in message
+        "No matching PMID, DOI, or citation link was found" in message
         for message in result.messages
     )
 
@@ -494,7 +537,7 @@ def test_rejected_identifiers_are_reported_in_every_scanned_story(
     assert {entry["location"]["part"] for entry in skipped} == {story}
     message = " ".join(result.messages)
     assert f"Found {count} PMID/DOI identifier{'s' if count > 1 else ''} but converted none" in message
-    assert "No matching PMID or DOI blocks were found" not in message
+    assert "No matching PMID, DOI, or citation link was found" not in message
     assert not result.output_docx.exists()
     assert not result.enw_file.exists()
 

@@ -8,10 +8,10 @@ The goal is simple: let authors draft with lightweight citation placeholders, th
 
 ## Current Status
 
-The current working path supports PMIDs plus DOI labels and DOI resolver URLs:
+PubMate supports labeled PMIDs, DOI labels, and citation links:
 
 1. Scan a `.docx` for explicit PMID markers.
-2. Scan DOI labels and `doi.org` URLs by default.
+2. Scan DOI labels, DOI URLs, and Word citation hyperlinks by default.
 3. Resolve PMIDs with NCBI E-utilities.
 4. Resolve DOIs by checking PubMed first, then falling back to DOI metadata services.
 5. Write a canonical EndNote Tagged Import `.endnote-import.enw` file.
@@ -52,6 +52,8 @@ http://dx.doi.org/10.1002/anie.202000000
 
 Bare DOI scanning is available with `--scan-bare-dois`.
 
+PubMate also reads a Word hyperlink or `HYPERLINK` field when its entire label is a DOI or the destination URL. This covers publisher links whose label is a DOI, links to PubMed records, and citation URLs in parentheses or brackets. PubMed Central links can be resolved through NCBI's identifier converter. NCBI Bookshelf and European Association of Urology guideline links use source metadata to create book or web references. Unsupported or unresolved citation links are recorded in the processing report and kept in the document. Ordinary links with prose labels and existing EndNote citations are preserved.
+
 ## Notes Stuck Inside Existing EndNote Citations
 
 A manuscript that has already been formatted by EndNote carries leftover
@@ -71,9 +73,9 @@ just outside the wrapper, as ordinary manuscript text, so EndNote reads it
 instead of treating it as a field result it may regenerate. The wrapper itself
 is left in place.
 
-Only an internal bibliography link qualifies, never an author's own link to a
-web page, and only identifiers that carried an explicit `PMID:`/`DOI:` label,
-never a bare one found through `--scan-bare-dois`.
+This recovery applies to internal bibliography links and requires an explicit
+`PMID:`/`DOI:` label. Citation hyperlinks with an external target are handled by
+the citation link scanner described above.
 
 Pass `--no-convert-locked-citations`, or clear "Convert PMID/DOI notes stuck
 in leftover EndNote formatting" in the macOS app's Settings, to leave them
