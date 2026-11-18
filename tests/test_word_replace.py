@@ -2490,6 +2490,79 @@ def test_citation_links_and_hyperlink_fields_convert_without_touching_normal_lin
     assert len(result.replacements) == 2
 
 
+@pytest.mark.parametrize("marker_kind", ["bookmark", "comment"])
+def test_citation_field_with_range_markers_keeps_its_result_and_range(tmp_path: Path, marker_kind: str) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    document = Document()
+    paragraph = document.add_paragraph("See ")
+    target = "https://pubmed.ncbi.nlm.nih.gov/12345678/"
+    _add_word_field(paragraph, f'HYPERLINK "{target}"', target)
+    result_run = paragraph.runs[-2]
+    if marker_kind == "comment":
+        document.add_comment(result_run, text="Annotation on the link", author="Reviewer")
+    else:
+        start = OxmlElement("w:bookmarkStart")
+        start.set(qn("w:id"), "1")
+        start.set(qn("w:name"), "Paper")
+        end = OxmlElement("w:bookmarkEnd")
+        end.set(qn("w:id"), "1")
+        result_run._r.addprevious(start)
+        result_run._r.addnext(end)
+    document.save(input_docx)
+    original_xml = Document(input_docx).paragraphs[0]._p.xml
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_identifiers == []
+    assert scan.skipped_identifiers[0]["reason"] == "locked_citation"
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Author", "2024")},
+    )
+    assert result.replacements == []
+    assert Document(output_docx).paragraphs[0]._p.xml == original_xml
+
+
+@pytest.mark.parametrize("mark_unresolved", [False, True])
+@pytest.mark.parametrize("missing", [
+    "https://pubmed.ncbi.nlm.nih.gov/23456789/",
+    "https://publisher.example/doi/10.1234/missing",
+    "https://doi.org/10.1234/missing",
+    "DOI: https://doi.org/10.1234/missing",
+])
+def test_unresolved_url_text_is_preserved_with_resolved_neighbors(tmp_path: Path, mark_unresolved: bool, missing: str) -> None:
+    input_docx = tmp_path / "input.docx"
+    output_docx = tmp_path / "output.docx"
+    resolved = "https://pubmed.ncbi.nlm.nih.gov/12345678/"
+    _save_docx(input_docx, [f"Missing {missing}.", f"See ({resolved}; {missing})."])
+
+    result = replace_pmids_in_docx(
+        input_docx=input_docx,
+        output_docx=output_docx,
+        records_by_pmid={"12345678": PubMedRecord("12345678", "Author", "2024")},
+        options=ReplacementOptions(mark_unresolved=mark_unresolved),
+    )
+    assert _read_paragraph_text(output_docx) == f"Missing {missing}."
+    assert missing in _read_paragraph_text(output_docx, 1)
+    assert "{Author, 2024, PMID-12345678}" in _read_paragraph_text(output_docx, 1)
+    assert len(result.replacements) == 1
+
+
+def test_doi_url_decodes_once_in_plain_text_and_word_link_forms(tmp_path: Path) -> None:
+    input_docx = tmp_path / "input.docx"
+    target = "https://doi.org/10.1234/example%252Fpart"
+    document = Document()
+    document.add_paragraph(target)
+    _add_external_hyperlink(document.add_paragraph(), target, target)
+    _add_word_field(document.add_paragraph(), f'HYPERLINK "{target}"', target)
+    document.save(input_docx)
+
+    scan = scan_docx(input_docx)
+    assert scan.unique_identifiers == [("doi", "10.1234/example%2fpart")]
+    assert len(scan.occurrences) == 3
+
+
 def test_bare_identifier_in_wrapper_is_not_converted(tmp_path: Path) -> None:
     """Opting into bare-DOI scanning must not widen wrapper editing.
 

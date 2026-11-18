@@ -909,8 +909,9 @@ def _complex_field_wrapper(
         or field["begin_run"].getparent() is not parent
     ):
         return None
-    # Field markers may be interleaved with result runs, but a hyperlink,
-    # tracked change, drawing, or other omitted content is not an empty shell.
+    # An external field is removed as a unit. Keep fields that contain a
+    # range marker so the replacement cannot detach a comment or bookmark.
+    allowed_markers = {qn("w:proofErr")} if external else _HARMLESS_PARAGRAPH_MARKERS
     for element in parent[parent.index(field["begin_run"]) : parent.index(end_record.run._r) + 1]:
         if element.tag == qn("w:r"):
             if not _run_element_has_only_safe_children(element) and not all(
@@ -918,7 +919,7 @@ def _complex_field_wrapper(
                 for child in element
             ):
                 return None
-        elif element.tag not in _HARMLESS_PARAGRAPH_MARKERS:
+        elif element.tag not in allowed_markers:
             return None
     start = int(field["result_start"])
     if start + sum(len(run.text) for run in runs) != end_record.start:
@@ -964,6 +965,9 @@ def _scan_paragraph(
             linked_blocks.append(IdentifierBlock(label, (value,), start, end, kind, "citation_link"))
 
     for match in HTTP_URL_RE.finditer(text):
+        # An identifier embedded in a URL is part of that URL, including
+        # when the URL itself has no supported metadata provider.
+        blocks = [block for block in blocks if not match.start() < block.start < match.end()]
         url = match[0].rstrip(".,;")
         while url and url[-1] in ")]" and url.count(url[-1]) > url.count({")": "(", "]": "["}[url[-1]]):
             url = url[:-1]
@@ -1465,7 +1469,7 @@ def _replace_paragraph_blocks(
     if not blocks:
         return [], []
 
-    replacement_blocks = _replacement_blocks_for_text(paragraph.text, blocks)
+    replacement_blocks = _replacement_blocks_for_text(paragraph.text, blocks, records_by_identifier)
     (
         replacement_blocks,
         field_or_hidden_blocks,
@@ -1490,12 +1494,11 @@ def _replace_paragraph_blocks(
         warnings.append(_tracked_change_warning(location, len(tracked_change_blocks)))
 
     for block in replacement_blocks:
-        citation_link = citation_links.get((block.start, block.end))
         replacement_text = _replacement_for_block(
             block=block,
             records_by_identifier=records_by_identifier,
             keep_pmid_text=options.keep_pmid_text,
-            mark_unresolved=options.mark_unresolved and citation_link is None and block.kind != "url",
+            mark_unresolved=options.mark_unresolved,
         )
         if replacement_text is None:
             identifier_label = _replacement_block_label(block)
@@ -1646,7 +1649,7 @@ def _insert_comment_pmids_at_anchors(
         if comment_location.comment_id in context.skipped_comment_ids:
             continue
         identifiers, citation_links = _scan_paragraph(paragraph, options, field_depth_cache)
-        blocks = _replacement_blocks_for_text(paragraph.text, identifiers)
+        blocks = _replacement_blocks_for_text(paragraph.text, identifiers, records_by_identifier)
         if not blocks:
             continue
         if not _comment_anchor_is_safe(context, comment_location.comment_id, field_depth_cache):
@@ -1680,7 +1683,7 @@ def _insert_comment_pmids_at_anchors(
                 block=block,
                 records_by_identifier=records_by_identifier,
                 keep_pmid_text=options.keep_pmid_text,
-                mark_unresolved=options.mark_unresolved and block.kind != "url",
+                mark_unresolved=options.mark_unresolved,
             )
             if replacement_text is None:
                 identifier_label = _replacement_block_label(block)
@@ -1811,6 +1814,9 @@ def _replacement_for_block(
     keep_pmid_text: bool,
     mark_unresolved: bool,
 ) -> str | None:
+    if any(_is_unresolved_url(item, records_by_identifier) for item in block.blocks):
+        return None
+
     resolved_records: list[ReferenceRecord] = []
     seen_record_keys: set[str] = set()
     unresolved_by_kind: dict[IdentifierKind, list[str]] = {"pmid": [], "doi": [], "url": []}
@@ -1849,11 +1855,18 @@ def _replacement_for_block(
 def _replacement_blocks_for_text(
     text: str,
     identifier_blocks: list[IdentifierBlock],
+    records_by_identifier: dict[IdentifierKey, ReferenceRecord] | None = None,
 ) -> list[ReplacementBlock]:
     if not identifier_blocks:
         return []
 
     grouped: list[ReplacementBlock] = []
+    standalone = {
+        block for block in identifier_blocks
+        if block.source in {"citation_link", "citation_url"} or (
+            records_by_identifier is not None and _is_unresolved_url(block, records_by_identifier)
+        )
+    }
     used_block_indexes: set[int] = set()
     for start, end in _identifier_only_wrappers(text):
         inside_indexes = [
@@ -1864,7 +1877,7 @@ def _replacement_blocks_for_text(
         if not inside_indexes or any(index in used_block_indexes for index in inside_indexes):
             continue
         inside_blocks = tuple(identifier_blocks[index] for index in inside_indexes)
-        if any(block.source == "citation_link" or block.kind == "url" for block in inside_blocks):
+        if any(block in standalone for block in inside_blocks):
             continue
         if not _wrapper_contains_only_identifiers(text, start, end, inside_blocks):
             continue
@@ -1879,7 +1892,7 @@ def _replacement_blocks_for_text(
         )
         used_block_indexes.update(inside_indexes)
 
-    for run in _adjacent_identifier_runs(text, identifier_blocks, used_block_indexes):
+    for run in _adjacent_identifier_runs(text, identifier_blocks, used_block_indexes, standalone):
         if len(run) > 1:
             grouped.append(
                 ReplacementBlock(
@@ -1923,6 +1936,7 @@ def _adjacent_identifier_runs(
     text: str,
     blocks: list[IdentifierBlock],
     used_block_indexes: set[int],
+    standalone: set[IdentifierBlock],
 ) -> Iterator[list[IdentifierBlock]]:
     available = [
         block for index, block in enumerate(blocks)
@@ -1934,7 +1948,10 @@ def _adjacent_identifier_runs(
     run = [available[0]]
     for block in available[1:]:
         separator = text[run[-1].end : block.start]
-        if _should_group_adjacent(run[-1], block) and re.fullmatch(r"[\s,;]+", separator or ""):
+        if (
+            all(item.source != "parenthetical" and item not in standalone for item in (run[-1], block))
+            and re.fullmatch(r"[\s,;]+", separator)
+        ):
             run.append(block)
             continue
         yield run
@@ -1942,10 +1959,9 @@ def _adjacent_identifier_runs(
     yield run
 
 
-def _should_group_adjacent(left: IdentifierBlock, right: IdentifierBlock) -> bool:
-    return all(
-        block.source not in {"parenthetical", "citation_link"} and block.kind != "url"
-        for block in (left, right)
+def _is_unresolved_url(block: IdentifierBlock, records: dict[IdentifierKey, ReferenceRecord]) -> bool:
+    return block.is_url and any(
+        (block.kind, identifier) not in records for identifier in block.identifiers
     )
 
 

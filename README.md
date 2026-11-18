@@ -56,6 +56,8 @@ PubMate also reads a Word hyperlink or `HYPERLINK` field when its entire label i
 
 PubMate removes parentheses and brackets that contain only converted citations, groups adjacent citations, and places the temporary citation after adjacent punctuation. EndNote applies superscript formatting when you select a superscript output style and update citations in Word.
 
+PubMate keeps unresolved URLs as written, including when `--mark-unresolved` is enabled. A document containing only unsupported citation URLs completes successfully and records them in the processing report.
+
 ## Notes Stuck Inside Existing EndNote Citations
 
 A manuscript that has already been formatted by EndNote carries leftover

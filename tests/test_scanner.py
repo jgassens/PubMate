@@ -1,6 +1,6 @@
 import pytest
 
-from pmid2endnote.scanner import extract_unique_pmids, normalize_doi, scan_text
+from pmid2endnote.scanner import citation_link_identifier, extract_unique_pmids, normalize_doi, scan_text
 
 
 def test_pmid_regex_extraction_examples() -> None:
@@ -118,6 +118,37 @@ def test_doi_normalization_preserves_internal_punctuation() -> None:
     )
     assert normalize_doi("https://doi.org/10.5555/foo(bar);baz).") == "10.5555/foo(bar);baz"
     assert normalize_doi("DOI: 10.1021/acs.chemrev.3c00409]") == "10.1021/acs.chemrev.3c00409"
+
+
+@pytest.mark.parametrize("scan_dois", [False, True])
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://pubmed.ncbi.nlm.nih.gov/12345678/", ("pmid", "12345678")),
+    ("https://www.ncbi.nlm.nih.gov/pubmed/12345678", ("pmid", "12345678")),
+    ("https://ncbi.nlm.nih.gov/books/NBK123/", ("url", "https://www.ncbi.nlm.nih.gov/books/NBK123/")),
+    ("https://pmc.ncbi.nlm.nih.gov/articles/PMC123/", ("url", "https://pmc.ncbi.nlm.nih.gov/articles/PMC123/")),
+    ("https://uroweb.org/guidelines/example", ("url", "https://uroweb.org/guidelines/example")),
+])
+def test_reference_paths_take_precedence_over_doi_query_and_labels(url, expected, scan_dois) -> None:
+    target = f"{url}?id=10.1234/other&doi=10.1234/other"
+    assert citation_link_identifier(target, scan_dois=scan_dois) == expected
+    assert citation_link_identifier(target, "10.1234/other", scan_dois=scan_dois) == expected
+
+
+def test_only_plos_article_urls_use_generic_id_as_doi() -> None:
+    other = "https://example.org/article?id=10.1234/example"
+    assert citation_link_identifier(other) == ("url", other)
+    plos = "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0000000"
+    assert citation_link_identifier(plos) == ("doi", "10.1371/journal.pone.0000000")
+
+
+def test_doi_url_paths_and_queries_decode_once() -> None:
+    resolver = "https://doi.org/10.1234/example%252Fpart?source=example"
+    publisher = "https://publisher.example/article?doi=10.1234%2Fexample%252Fpart"
+    expected = "10.1234/example%2fpart"
+    assert scan_text(resolver)[0].dois == (expected,)
+    assert scan_text(f"DOI: {resolver}")[0].dois == (expected,)
+    assert citation_link_identifier(resolver, resolver) == ("doi", expected)
+    assert citation_link_identifier(publisher, "10.1234/example%2Fpart") == ("doi", expected)
 
 
 def test_doi_in_semicolon_separated_list_drops_the_separator() -> None:

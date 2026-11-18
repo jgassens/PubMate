@@ -106,6 +106,12 @@ class IdentifierBlock:
     def dois(self) -> tuple[str, ...]:
         return self.identifiers if self.kind == "doi" else ()
 
+    @property
+    def is_url(self) -> bool:
+        return self.source in {"citation_url", "citation_link", "doi_url"} or (
+            self.source == "doi_label" and HTTP_URL_RE.search(self.original_text) is not None
+        )
+
 
 PmidBlock = IdentifierBlock
 
@@ -116,13 +122,13 @@ def normalize_pmid(value: str) -> str:
     return value.strip()
 
 
-def normalize_doi(value: str) -> str:
+def normalize_doi(value: str, *, decode_percent: bool = True) -> str:
     """Normalize DOI labels, resolver URLs, and external punctuation."""
 
-    doi = unquote(value.strip())
+    doi = unquote(value) if decode_percent else value
+    doi = doi.strip()
     doi = re.sub(r"(?i)^doi\s*:\s*", "", doi).strip()
     doi = re.sub(r"(?i)^https?://(?:dx\.)?doi\.org/", "", doi).strip()
-    doi = doi.strip()
     doi = _strip_external_doi_punctuation(doi)
     return doi.lower()
 
@@ -183,7 +189,11 @@ def citation_link_identifier(
     if host in {"ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov"}:
         pmid = re.fullmatch(r"pubmed/(\d{1,12})", path)
 
-    target_doi = _doi_from_citation_url(host, path, parts.query)
+    known_source = (
+        host in {"uroweb.org", "www.uroweb.org", "ncbi.nlm.nih.gov"}
+        or host.endswith(".ncbi.nlm.nih.gov")
+    )
+    target_doi = None if known_source else _doi_from_citation_url(host, path, parts.query)
     visible_doi = None
     if label:
         label = label.strip()
@@ -194,30 +204,40 @@ def citation_link_identifier(
             if BARE_DOI_RE.fullmatch(display_doi):
                 visible_doi = display_doi
                 if target_doi and visible_doi != target_doi:
-                    if re.sub(r"/(?:full|abstract|pdf)$", "", visible_doi) != target_doi:
+                    literal_doi = normalize_doi(label, decode_percent=False)
+                    if target_doi not in {literal_doi, re.sub(r"/(?:full|abstract|pdf)$", "", visible_doi)}:
                         return None
             else:
                 labeled_pmid = PMID_BLOCK_RE.fullmatch(label)
                 if not (pmid and labeled_pmid and labeled_pmid["ids"] == pmid[1]):
                     return None
 
+    # A recognized resource path identifies the cited record. Query data and
+    # alternate identifier labels must not supersede it.
+    if pmid:
+        return "pmid", pmid[1]
+    canonical_url = _canonical_reference_url(host, path)
+    if canonical_url:
+        return "url", canonical_url
     doi = target_doi or visible_doi
     if doi:
         return ("doi", doi) if scan_dois else None
-    if pmid:
-        return "pmid", pmid[1]
-    if host in {"ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov"} and re.fullmatch(r"books/NBK\d+", path, re.I):
-        url = f"https://www.ncbi.nlm.nih.gov/books/{path.split('/')[1].upper()}/"
-    elif host == "pmc.ncbi.nlm.nih.gov" and re.fullmatch(r"articles/PMC\d+", path, re.I):
-        url = f"https://pmc.ncbi.nlm.nih.gov/articles/{path.split('/')[1].upper()}/"
-    elif host in {"uroweb.org", "www.uroweb.org"} and re.fullmatch(r"guidelines/[a-z0-9-]+", path):
-        url = f"https://uroweb.org/{path}"
     return "url", url
+
+
+def _canonical_reference_url(host: str, path: str) -> str | None:
+    if host in {"ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov"} and re.fullmatch(r"books/NBK\d+", path, re.I):
+        return f"https://www.ncbi.nlm.nih.gov/books/{path.split('/')[1].upper()}/"
+    if host == "pmc.ncbi.nlm.nih.gov" and re.fullmatch(r"articles/PMC\d+", path, re.I):
+        return f"https://pmc.ncbi.nlm.nih.gov/articles/{path.split('/')[1].upper()}/"
+    if host in {"uroweb.org", "www.uroweb.org"} and re.fullmatch(r"guidelines/[a-z0-9-]+", path):
+        return f"https://uroweb.org/{path}"
+    return None
 
 
 def _doi_from_citation_url(host: str, path: str, query: str) -> str | None:
     if host in {"doi.org", "dx.doi.org"}:
-        return normalize_doi(path) if BARE_DOI_RE.fullmatch(path) else None
+        return normalize_doi(path, decode_percent=False) if BARE_DOI_RE.fullmatch(path) else None
 
     match = re.search(
         rf"(?:^|/)(?P<prefix>doi/(?:full/|abs/|abstract/|pdf/)?|articles?/)(?P<doi>{DOI_CORE_RE})$",
@@ -227,12 +247,14 @@ def _doi_from_citation_url(host: str, path: str, query: str) -> str | None:
         doi = match["doi"]
         if match["prefix"].lower().startswith("article"):
             doi = re.sub(r"/(?:full|abstract|pdf)$", "", doi, flags=re.I)
-        return normalize_doi(doi)
+        return normalize_doi(doi, decode_percent=False)
     params = parse_qs(query)
-    for key in ("doi", "id"):
+    plos_article = host == "journals.plos.org" and re.fullmatch(r"plos[a-z]+/article(?:/file)?", path)
+    query_keys = ("doi", "id") if plos_article else ("doi",)
+    for key in query_keys:
         values = params.get(key, [])
         if len(values) == 1 and BARE_DOI_RE.fullmatch(values[0]):
-            return normalize_doi(values[0])
+            return normalize_doi(values[0], decode_percent=False)
     return None
 
 
@@ -292,7 +314,10 @@ def _doi_blocks(text: str, *, scan_bare_dois: bool) -> list[IdentifierBlock]:
         for match in regex.finditer(text):
             raw_doi = match.group("doi")
             suffix_len = _external_doi_suffix_length(raw_doi, text[match.end() :])
-            normalized = normalize_doi(raw_doi[: len(raw_doi) - suffix_len])
+            value = raw_doi[: len(raw_doi) - suffix_len]
+            if source == "doi_url" or value.lower().startswith(("http://", "https://")):
+                value = value.split("?", 1)[0].split("#", 1)[0]
+            normalized = normalize_doi(value)
             end = match.end() - suffix_len
             blocks.append(
                 IdentifierBlock(

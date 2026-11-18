@@ -14,6 +14,11 @@ from pmid2endnote.models import ReferenceRecord
 BOOK_URL_RE = re.compile(r"https://www\.ncbi\.nlm\.nih\.gov/books/(NBK\d+)/")
 PMC_URL_RE = re.compile(r"https://pmc\.ncbi\.nlm\.nih\.gov/articles/(PMC\d+)/")
 EAU_URL_RE = re.compile(r"https://uroweb\.org/guidelines/[a-z0-9-]+")
+UNSUPPORTED_URL_WARNING = "No metadata provider for this URL."
+
+
+def supports_reference_url(url: str) -> bool:
+    return any(pattern.fullmatch(url) for pattern in (BOOK_URL_RE, PMC_URL_RE, EAU_URL_RE))
 
 
 def _url_citation_key(url: str) -> str:

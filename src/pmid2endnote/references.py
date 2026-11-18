@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from typing import Iterable
+from urllib.parse import quote
 from xml.etree.ElementTree import ParseError
 
 from lxml.etree import ParserError
@@ -14,7 +15,14 @@ from pmid2endnote.errors import PubMedFetchError, PubMedParseError
 from pmid2endnote.models import IdentifierKind, IdentifierResolution, ReferenceRecord
 from pmid2endnote.pubmed import PubMedClient, PubMedRecord
 from pmid2endnote.scanner import normalize_doi
-from pmid2endnote.web_references import BOOK_URL_RE, EAU_URL_RE, PMC_URL_RE, books_reference, eau_reference
+from pmid2endnote.web_references import (
+    BOOK_URL_RE,
+    EAU_URL_RE,
+    PMC_URL_RE,
+    UNSUPPORTED_URL_WARNING,
+    books_reference,
+    eau_reference,
+)
 
 
 def pmid_citation_key(pmid: str) -> str:
@@ -28,8 +36,8 @@ def doi_citation_key(normalized_doi: str) -> str:
 
 def reference_from_pubmed(record: PubMedRecord, *, source_identifiers: Iterable[str] = ()) -> ReferenceRecord:
     sources = tuple(dict.fromkeys((f"PMID:{record.pmid}", *source_identifiers)))
-    doi = normalize_doi(record.doi) if record.doi else None
-    url = f"https://doi.org/{doi}" if doi else None
+    doi = normalize_doi(record.doi, decode_percent=False) if record.doi else None
+    url = f"https://doi.org/{quote(doi)}" if doi else None
     return ReferenceRecord(
         citation_key=pmid_citation_key(record.pmid),
         first_author=record.first_author,
@@ -49,7 +57,7 @@ def reference_from_pubmed(record: PubMedRecord, *, source_identifiers: Iterable[
 
 
 class ReferenceResolver:
-    """Resolve PMID and DOI identifiers into canonical ReferenceRecord objects."""
+    """Resolve citation identifiers and supported URLs into reference records."""
 
     def __init__(
         self,
@@ -131,7 +139,7 @@ class ReferenceResolver:
                 if response.status_code == 200:
                     reference = eau_reference(url, response.content)
             else:
-                return IdentifierResolution("url", url, None, warnings=("No metadata provider for this URL.",))
+                return IdentifierResolution("url", url, None, warnings=(UNSUPPORTED_URL_WARNING,))
         except (requests.RequestException, PubMedFetchError, PubMedParseError, ParseError, ParserError, ValueError):
             return IdentifierResolution("url", url, None, warnings=("URL metadata lookup failed.",))
         if reference is None:
@@ -148,7 +156,11 @@ class ReferenceResolver:
         )
         if response.status_code != 200:
             return None
-        for record in response.json().get("records", []):
+        payload = response.json()
+        records = payload.get("records") if isinstance(payload, dict) else None
+        if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+            raise ValueError("Malformed PubMed Central ID Converter response")
+        for record in records:
             if record.get("pmcid") != pmcid:
                 continue
             pmid = str(record.get("pmid", ""))
@@ -159,10 +171,13 @@ class ReferenceResolver:
                 pubmed_record = self.pubmed_client.fetch_records([pmid]).get(pmid)
                 if pubmed_record:
                     return reference_from_pubmed(pubmed_record, source_identifiers=(f"PMCID:{pmcid}",))
-            if record.get("doi"):
-                doi = normalize_doi(record["doi"])
+            doi_value = record.get("doi")
+            if isinstance(doi_value, str) and doi_value:
+                doi = normalize_doi(doi_value, decode_percent=False)
                 resolution = self.resolutions.get(("doi", doi)) or self._resolve_doi(doi)
                 return resolution.reference
+            if doi_value is not None and not isinstance(doi_value, str):
+                raise ValueError("Malformed DOI in PubMed Central ID Converter response")
         return None
 
     def _resolve_doi_metadata(self, doi: str) -> tuple[ReferenceRecord | None, list[str]]:
@@ -192,9 +207,10 @@ class ReferenceResolver:
         return ["content-negotiation", "crossref", "datacite"]
 
     def _fetch_doi_payload(self, doi: str, source: str) -> dict | None:
+        encoded_doi = quote(doi)
         if source == "content-negotiation":
             response = self.session.get(
-                f"https://doi.org/{doi}",
+                f"https://doi.org/{encoded_doi}",
                 headers={"Accept": "application/vnd.citationstyles.csl+json"},
                 timeout=self.timeout_seconds,
             )
@@ -204,7 +220,7 @@ class ReferenceResolver:
             return response.json()
         if source == "crossref":
             response = self.session.get(
-                f"https://api.crossref.org/works/{doi}",
+                f"https://api.crossref.org/works/{encoded_doi}",
                 timeout=self.timeout_seconds,
             )
             if response.status_code == 404:
@@ -213,7 +229,7 @@ class ReferenceResolver:
             return response.json().get("message", {})
         if source == "datacite":
             response = self.session.get(
-                f"https://api.datacite.org/dois/{doi}",
+                f"https://api.datacite.org/dois/{encoded_doi}",
                 timeout=self.timeout_seconds,
             )
             if response.status_code == 404:
@@ -231,10 +247,13 @@ class ReferenceResolver:
 
 
 def _pubmed_record_has_doi(record: PubMedRecord, doi: str) -> bool:
-    return any(normalize_doi(value) == doi for value in record.doi_values)
+    return any(normalize_doi(value, decode_percent=False) == doi for value in record.doi_values)
 
 
 def _reference_from_doi_payload(doi: str, payload: dict, source: str) -> ReferenceRecord | None:
+    payload_doi = payload.get("DOI") or payload.get("doi")
+    if payload_doi and normalize_doi(str(payload_doi), decode_percent=False) != doi:
+        return None
     title = _first_text(payload.get("title"))
     authors = _authors_from_payload(payload)
     year = _year_from_payload(payload)
@@ -242,8 +261,7 @@ def _reference_from_doi_payload(doi: str, payload: dict, source: str) -> Referen
     volume = payload.get("volume")
     issue = payload.get("issue")
     pages = payload.get("page")
-    url = payload.get("URL") or payload.get("url") or f"https://doi.org/{doi}"
-    payload_doi = normalize_doi(str(payload.get("DOI") or payload.get("doi") or doi))
+    url = payload.get("URL") or payload.get("url") or f"https://doi.org/{quote(doi)}"
     return ReferenceRecord(
         citation_key=doi_citation_key(doi),
         first_author=_first_author_from_authors(authors),
@@ -254,7 +272,7 @@ def _reference_from_doi_payload(doi: str, payload: dict, source: str) -> Referen
         volume=str(volume) if volume else None,
         issue=str(issue) if issue else None,
         pages=str(pages) if pages else None,
-        doi=payload_doi,
+        doi=doi,
         url=url,
         metadata_source=source,
         source_identifiers=(f"DOI:{doi}",),
