@@ -54,6 +54,8 @@ Bare DOI scanning is available with `--scan-bare-dois`.
 
 PubMate also reads a Word hyperlink or `HYPERLINK` field when its entire label is a DOI or the destination URL. This covers publisher links whose label is a DOI, links to PubMed records, and citation URLs in parentheses or brackets. PubMed Central links can be resolved through NCBI's identifier converter. NCBI Bookshelf and European Association of Urology guideline links use source metadata to create book or web references. Unsupported or unresolved citation links are recorded in the processing report and kept in the document. Ordinary links with prose labels and existing EndNote citations are preserved.
 
+PubMate removes parentheses and brackets that contain only converted citations, groups adjacent citations, and places the temporary citation after adjacent punctuation. EndNote applies superscript formatting when you select a superscript output style and update citations in Word.
+
 ## Notes Stuck Inside Existing EndNote Citations
 
 A manuscript that has already been formatted by EndNote carries leftover

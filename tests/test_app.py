@@ -94,7 +94,8 @@ def test_url_only_references_import_with_types_and_report_unsupported_links(tmp_
     assert "%0 Book Section\n%A Chen, J\n%A Park, L\n%D 2025\n%T Example chapter\n%B Example book" in enw
     assert "%0 Web Page\n%A European Association of Urology,\n%T Example Guidelines" in enw
     output_text = Document(result.output_docx).paragraphs[0].text
-    assert "{European Association of Urology, , URL-" in output_text
+    assert output_text.startswith("See,{Chen, 2025, URL-")
+    assert ";European Association of Urology, , URL-" in output_text
     assert "https://example.com/unresolved" in output_text
     statuses = result.report["identifier_statuses"]
     assert [entry["resolved"] for entry in statuses] == [True, True, False]

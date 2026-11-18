@@ -301,8 +301,8 @@ def test_replaces_pmids_beside_existing_endnote_field(tmp_path: Path) -> None:
     output_paragraph = Document(output_docx).paragraphs[0]
     assert output_paragraph.text == (
         "preparation, illustrating the broader challenge of preserving antigen structure "
-        "during bacterial inactivation.11-13 \u00a0"
-        "{A, 2024, PMID-38319200;B, 2024, PMID-38644097;C, 2017, PMID-27966556}.   "
+        "during bacterial inactivation.11-13."
+        "{A, 2024, PMID-38319200;B, 2024, PMID-38644097;C, 2017, PMID-27966556}   "
         "&#x20;"
     )
     assert len(output_paragraph._p.xpath(".//w:fldChar")) == 3
@@ -341,8 +341,8 @@ def test_replaces_pmids_before_and_after_endnote_hyperlink_field(tmp_path: Path)
 
     output_paragraph = Document(output_docx).paragraphs[0]
     assert output_paragraph.text == (
-        "Before {First, 2024, PMID-12345678} 1 after "
-        "{Second, 2025, PMID-23456789}."
+        "Before {First, 2024, PMID-12345678} 1 after."
+        "{Second, 2025, PMID-23456789}"
     )
     assert _endnote_field_xml(output_paragraph) == original_field_xml
     assert result.warnings == []
@@ -625,7 +625,7 @@ def test_plain_paragraph_after_closed_multi_paragraph_field_is_replaced(
     assert output_document.paragraphs[0].text == ""
     assert output_document.paragraphs[1].text == "field result"
     assert output_document.paragraphs[2].text == (
-        "After {Safe, 2024, PMID-12345678}."
+        "After.{Safe, 2024, PMID-12345678}"
     )
     assert result.warnings == []
 
@@ -1437,7 +1437,7 @@ def test_identifier_inside_existing_word_field_remains_untouched(tmp_path: Path)
     )
 
     assert Document(output_docx).paragraphs[0].text == (
-        "Before PMID 38319200 after {Safe, 2024, PMID-38644097}."
+        "Before PMID 38319200 after.{Safe, 2024, PMID-38644097}"
     )
 
 
@@ -1732,7 +1732,7 @@ def test_reference_section_identifiers_are_skipped_by_default(tmp_path: Path) ->
     )
 
     output_document = Document(output_docx)
-    assert output_document.paragraphs[0].text == "Before {Smith, 2024, PMID-12345678}."
+    assert output_document.paragraphs[0].text == "Before.{Smith, 2024, PMID-12345678}"
     assert output_document.paragraphs[2].text == (
         "1. Example article. PMID: 99999999. DOI: 10.1021/acs.chemrev.3c00409."
     )
@@ -1871,7 +1871,7 @@ def test_parenthetical_unresolved_pmid_stays_outside_braces(tmp_path: Path) -> N
     )
 
 
-def test_parenthetical_mode_preserves_surrounding_punctuation(tmp_path: Path) -> None:
+def test_parenthetical_mode_groups_citations_after_punctuation(tmp_path: Path) -> None:
     input_docx = tmp_path / "input.docx"
     output_docx = tmp_path / "output.docx"
     _save_docx(input_docx, ["activity. (6426050), (104929), (9036716)."])
@@ -1889,7 +1889,7 @@ def test_parenthetical_mode_preserves_surrounding_punctuation(tmp_path: Path) ->
 
     assert (
         _read_paragraph_text(output_docx)
-        == "activity. {A, 1983, PMID-6426050}, {B, 1978, PMID-104929}, {C, 1997, PMID-9036716}."
+        == "activity.{A, 1983, PMID-6426050;B, 1978, PMID-104929;C, 1997, PMID-9036716}"
     )
 
 
@@ -2445,14 +2445,14 @@ def test_citation_links_and_hyperlink_fields_convert_without_touching_normal_lin
     input_docx = tmp_path / "input.docx"
     output_docx = tmp_path / "output.docx"
     document = Document()
-    paragraph = document.add_paragraph("Before (")
+    paragraph = document.add_paragraph("Before (with prose) ([")
     hyperlink = _add_external_hyperlink(
         paragraph, "10.1234/example/full", "https://publisher.example/articles/10.1234/example/full"
     )
     proof_marker = OxmlElement("w:proofErr")
     proof_marker.set(qn("w:type"), "spellStart")
     hyperlink.insert(0, proof_marker)
-    paragraph.add_run("); ")
+    paragraph.add_run("]); ")
     _add_word_field(paragraph, ' HYPERLINK "https://pubmed.ncbi.nlm.nih.gov/12345678/" \\h ',
                     "pubmed.ncbi.nlm.nih.gov/12345678/")
     paragraph.add_run("; see ")
@@ -2480,7 +2480,7 @@ def test_citation_links_and_hyperlink_fields_convert_without_touching_normal_lin
     )
     output = Document(output_docx).paragraphs[0]
     assert output.text == (
-        "Before ({First, 2023, DOI-KEY}); {Second, 2024, PMID-12345678}; "
+        "Before (with prose);{First, 2023, DOI-KEY;Second, 2024, PMID-12345678} "
         "see the article or https://example.com/unresolved{Protected, 2024, #1}"
     )
     assert [link.text for link in output.hyperlinks] == [

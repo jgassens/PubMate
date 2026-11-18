@@ -102,6 +102,22 @@ class ReplacementBlock:
 
 
 @dataclass(frozen=True)
+class PlacedCitation:
+    """The visible range of one or more newly written temporary citations."""
+
+    start: int
+    end: int
+    reports: tuple[dict[str, Any], ...]
+
+    @property
+    def text(self) -> str:
+        parts = dict.fromkeys(
+            part for report in self.reports for part in report["replacement_text"][1:-1].split(";")
+        )
+        return "{" + ";".join(parts) + "}"
+
+
+@dataclass(frozen=True)
 class TextLocation:
     """Location of a paragraph-like text container in a Word document."""
 
@@ -1463,7 +1479,6 @@ def _replace_paragraph_blocks(
         citation_links=citation_links,
     )
     planned: list[tuple[ReplacementBlock, str, dict[str, Any]]] = []
-    report_replacements: list[dict[str, Any]] = []
     warnings = (
         [_unsafe_content_warning(location, len(field_or_hidden_blocks))]
         if field_or_hidden_blocks
@@ -1500,40 +1515,107 @@ def _replace_paragraph_blocks(
             "location": location.as_report_dict(),
         }
         planned.append((block, replacement_text, report))
-        if options.dry_run:
-            report_replacements.append(report)
 
-    if not options.dry_run:
-        applied_reports: list[dict[str, Any]] = []
-        application_warnings: list[str] = []
-        for block, replacement_text, report in sorted(
-            planned,
-            key=lambda item: item[0].start,
-            reverse=True,
+    # Both runs edit the in-memory document so the dry-run report reflects the
+    # same Word layout checks. The caller only saves a non-dry run.
+    applied: list[tuple[int, int, dict[str, Any], int]] = []
+    application_warnings: list[str] = []
+    for block, replacement_text, report in reversed(planned):
+        before_length = len(paragraph.text)
+        citation_link = citation_links.get((block.start, block.end))
+        start = block.start
+        if citation_link is not None:
+            _replace_citation_link(citation_link, replacement_text)
+            start += len(block.original_text) - len(block.original_text.lstrip())
+        elif not _replace_paragraph_range(
+            paragraph,
+            start,
+            block.end,
+            replacement_text,
+            convert_locked_citations=options.convert_locked_citations,
+            field_depth_cache=field_depth_cache,
         ):
-            citation_link = citation_links.get((block.start, block.end))
-            if citation_link is not None:
-                _replace_citation_link(citation_link, replacement_text)
-                applied_reports.append(report)
-            elif _replace_paragraph_range(
-                paragraph,
-                block.start,
-                block.end,
-                replacement_text,
-                convert_locked_citations=options.convert_locked_citations,
-                field_depth_cache=field_depth_cache,
-            ):
-                applied_reports.append(report)
-            else:
-                application_warnings.append(
-                    f"Could not apply replacement at {location.part} paragraph "
-                    f"{location.paragraph_index}; left original text unchanged: "
-                    f"{block.original_text}"
-                )
-        report_replacements.extend(reversed(applied_reports))
-        warnings.extend(reversed(application_warnings))
+            application_warnings.append(
+                f"Could not apply replacement at {location.part} paragraph "
+                f"{location.paragraph_index}; left original text unchanged: "
+                f"{block.original_text}"
+            )
+            continue
+        applied.append((start, start + len(replacement_text), report, len(paragraph.text) - before_length))
 
-    return report_replacements, warnings
+    citations: list[PlacedCitation] = []
+    reports: list[dict[str, Any]] = []
+    offset = 0
+    for start, end, report, length_change in reversed(applied):
+        reports.append(report)
+        if re.fullmatch(r"\{[^{}]+\}", report["replacement_text"]):
+            citations.append(PlacedCitation(start + offset, end + offset, (report,)))
+        offset += length_change
+    warnings.extend(reversed(application_warnings))
+    if citations and not _place_citations_after_punctuation(paragraph, citations, field_depth_cache):
+        warnings.append(
+            f"Could not adjust citation punctuation in {location.part} paragraph "
+            f"{location.paragraph_index} because it crosses protected Word content."
+        )
+    return reports, warnings
+
+
+def _place_citations_after_punctuation(
+    paragraph: Paragraph, citations: list[PlacedCitation], field_depth_cache: FieldDepthCache
+) -> bool:
+    """Consume citation-only delimiters and move adjacent punctuation ahead of citations."""
+
+    text = paragraph.text
+    # Mask the known citations so parentheses in author names do not affect
+    # recognition of the manuscript's surrounding delimiters.
+    masked = list(text)
+    for citation in citations:
+        masked[citation.start:citation.end] = "x" * (citation.end - citation.start)
+
+    groups = list(citations)
+    for start, end in _identifier_only_wrappers("".join(masked)):
+        inside = tuple(cite for cite in groups if start < cite.start and cite.end < end)
+        if inside and _wrapper_contains_only_identifiers(text, start, end, inside):
+            groups = [cite for cite in groups if cite not in inside]
+            reports = tuple(report for cite in sorted(inside, key=lambda cite: cite.start) for report in cite.reports)
+            groups.append(PlacedCitation(start, end, reports))
+
+    # Adjacent citation-only groups share a single spot after punctuation.
+    clusters: list[PlacedCitation] = []
+    for group in sorted(groups, key=lambda cite: cite.start):
+        if clusters and re.fullmatch(r"[ \t\u00a0]*[,;]?[ \t\u00a0]*", text[clusters[-1].end:group.start]):
+            previous = clusters.pop()
+            group = PlacedCitation(previous.start, group.end, previous.reports + group.reports)
+        clusters.append(group)
+
+    complete = True
+    for group in reversed(clusters):
+        start, end = group.start, group.end
+        trailing = re.match(r"[ \t\u00a0]*([.,;:!?]+)", text[end:])
+        punctuation = trailing[1] if trailing else ""
+        if trailing:
+            end += trailing.end()
+        left = len(text[:start].rstrip(" \t\u00a0"))
+        if left and (trailing or text[start] in "([" or text[left - 1] in ".,;:!?"):
+            start = left
+            if punctuation and text[:left].endswith(punctuation):
+                punctuation = ""
+        citation_text = group.text
+        replacement = punctuation + citation_text
+        if replacement == text[start:end]:
+            continue
+        layout = PlacedCitation(start, end, group.reports)
+        safe, *_ = _partition_blocks_around_unsafe_content(
+            paragraph, [layout], field_depth_cache, convert_locked_citations=False
+        )
+        if not safe or not _replace_paragraph_range(
+            paragraph, start, end, replacement, convert_locked_citations=False,
+        ):
+            complete = False
+            continue
+        for report in group.reports:
+            report["replacement_text"] = citation_text
+    return complete
 
 
 def _insert_comment_pmids_at_anchors(
@@ -1812,10 +1894,17 @@ def _replacement_blocks_for_text(
 
 
 def _identifier_only_wrappers(text: str) -> Iterator[tuple[int, int]]:
-    for match in re.finditer(r"\[[^\[\]]+\]", text):
-        yield match.start(), match.end()
-    for match in re.finditer(r"\([^()]+\)", text):
-        yield match.start(), match.end()
+    closing = {"(": ")", "[": "]"}
+    pending: list[tuple[str, int]] = []
+    for match in re.finditer(r"[\[\]()]", text):
+        delimiter = match[0]
+        if delimiter in closing:
+            pending.append((closing[delimiter], match.start()))
+        elif pending and pending[-1][0] == delimiter:
+            _, start = pending.pop()
+            yield start, match.end()
+        else:
+            pending.clear()
 
 
 def _adjacent_identifier_runs(
@@ -1856,7 +1945,7 @@ def _wrapper_contains_only_identifiers(
     text: str,
     start: int,
     end: int,
-    blocks: tuple[IdentifierBlock, ...],
+    blocks: tuple[TextRange, ...],
 ) -> bool:
     inner_start = start + 1
     inner_end = end - 1
